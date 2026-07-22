@@ -242,6 +242,8 @@ pub struct AgentInputFooter {
     #[cfg(feature = "voice_input")]
     cli_voice_input_lifecycle: VoiceInputLifecycle,
     #[cfg(feature = "voice_input")]
+    cli_session_handle: Option<SpawnedFutureHandle>,
+    #[cfg(feature = "voice_input")]
     cli_transcription_handle: Option<SpawnedFutureHandle>,
     v2_model_selector: Option<ViewHandle<ModelSelector>>,
 
@@ -920,6 +922,8 @@ impl AgentInputFooter {
             handoff_to_cloud_button,
             #[cfg(feature = "voice_input")]
             cli_voice_input_lifecycle: VoiceInputLifecycle::default(),
+            #[cfg(feature = "voice_input")]
+            cli_session_handle: None,
             #[cfg(feature = "voice_input")]
             cli_transcription_handle: None,
             v2_model_selector,
@@ -1739,17 +1743,29 @@ impl AgentInputFooter {
 
     #[cfg(feature = "voice_input")]
     fn stop_cli_voice_and_reset(&mut self, ctx: &mut ViewContext<Self>) {
-        if !self.cli_voice_input_lifecycle.is_active() {
+        if matches!(
+            self.cli_voice_input_lifecycle.state(),
+            VoiceInputLifecycleState::Idle
+        ) {
             return;
         }
+        if let Some(handle) = self.cli_session_handle.take() {
+            handle.abort();
+        }
 
-        if self.cli_voice_input_lifecycle.state() == VoiceInputLifecycleState::Listening {
+        if matches!(
+            self.cli_voice_input_lifecycle.state(),
+            VoiceInputLifecycleState::Listening
+        ) {
             voice_input::VoiceInput::handle(ctx).update(ctx, |voice_input, _| {
                 voice_input.abort_listening();
             });
         }
 
-        if self.cli_voice_input_lifecycle.state() == VoiceInputLifecycleState::Transcribing {
+        if matches!(
+            self.cli_voice_input_lifecycle.state(),
+            VoiceInputLifecycleState::Transcribing
+        ) {
             if let Some(handle) = self.cli_transcription_handle.take() {
                 handle.abort();
             }
@@ -1760,6 +1776,7 @@ impl AgentInputFooter {
         }
 
         self.cli_voice_input_lifecycle.cancel();
+        self.cli_session_handle = None;
         self.cli_transcription_handle = None;
         self.update_cli_mic_button_state(ctx);
     }
@@ -1805,9 +1822,13 @@ impl AgentInputFooter {
 
                 match session_result {
                     Ok(session) => {
-                        let Some(generation) = self.cli_voice_input_lifecycle.start() else {
+                        if !self.cli_voice_input_lifecycle.start() {
                             return;
-                        };
+                        }
+                        self.cli_session_handle = Some(ctx.spawn(
+                            async move { session.await_result().await },
+                            Self::handle_cli_voice_session_result,
+                        ));
                         self.update_cli_mic_button_state(ctx);
 
                         if let Some(agent) = self.cli_agent(ctx) {
@@ -1822,13 +1843,6 @@ impl AgentInputFooter {
                         if matches!(*source, voice_input::VoiceInputToggledFrom::Button) {
                             self.maybe_show_first_time_cli_voice_toast(ctx);
                         }
-
-                        ctx.spawn(
-                            async move { session.await_result().await },
-                            move |view, result, ctx| {
-                                view.handle_cli_voice_session_result(generation, result, ctx);
-                            },
-                        );
                     }
                     Err(StartListeningError::AccessDenied) => {
                         self.show_cli_microphone_access_toast(ctx);
@@ -1860,11 +1874,11 @@ impl AgentInputFooter {
     #[cfg(feature = "voice_input")]
     fn handle_cli_voice_session_result(
         &mut self,
-        generation: u64,
         result: VoiceSessionResult,
         ctx: &mut ViewContext<Self>,
     ) {
         use crate::editor::VoiceTranscriber;
+        self.cli_session_handle = None;
 
         match result {
             VoiceSessionResult::Audio {
@@ -1877,10 +1891,7 @@ impl AgentInputFooter {
                     let language = AISettings::as_ref(ctx)
                         .voice_input_language_code()
                         .map(str::to_owned);
-                    if !self
-                        .cli_voice_input_lifecycle
-                        .begin_transcribing(generation)
-                    {
+                    if !self.cli_voice_input_lifecycle.begin_transcribing() {
                         return;
                     }
 
@@ -1890,16 +1901,14 @@ impl AgentInputFooter {
 
                     self.cli_transcription_handle = Some(ctx.spawn(
                         async move { transcriber.transcribe(wav_base64, language).await },
-                        move |view, result, ctx| {
-                            view.apply_cli_transcribed_voice_input(generation, result, ctx);
-                        },
+                        Self::apply_cli_transcribed_voice_input,
                     ));
                 } else {
-                    self.cli_voice_input_lifecycle.fail(generation);
+                    self.cli_voice_input_lifecycle.fail();
                 }
             }
             VoiceSessionResult::Aborted { .. } => {
-                self.cli_voice_input_lifecycle.fail(generation);
+                self.cli_voice_input_lifecycle.fail();
             }
         }
         self.update_cli_mic_button_state(ctx);
@@ -1909,11 +1918,10 @@ impl AgentInputFooter {
     #[cfg(feature = "voice_input")]
     fn apply_cli_transcribed_voice_input(
         &mut self,
-        generation: u64,
         result: Result<String, TranscribeError>,
         ctx: &mut ViewContext<Self>,
     ) {
-        if !self.cli_voice_input_lifecycle.complete(generation) {
+        if !self.cli_voice_input_lifecycle.complete() {
             return;
         }
         voice_input::VoiceInput::handle(ctx).update(ctx, |voice, _| {
@@ -1957,8 +1965,10 @@ impl AgentInputFooter {
             VoiceInputLifecycleState::Listening => Icon::Stop,
             VoiceInputLifecycleState::Transcribing => Icon::DotsHorizontal,
         };
-        let is_transcribing =
-            self.cli_voice_input_lifecycle.state() == VoiceInputLifecycleState::Transcribing;
+        let is_transcribing = matches!(
+            self.cli_voice_input_lifecycle.state(),
+            VoiceInputLifecycleState::Transcribing
+        );
 
         self.mic_button.update(ctx, |button, ctx| {
             button.set_icon(Some(icon), ctx);

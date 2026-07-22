@@ -33,15 +33,14 @@ pub enum VoiceInputLifecycleState {
     Transcribing,
 }
 
-/// Generation-scoped lifecycle shared by voice-input surfaces.
+/// Lifecycle shared by voice-input surfaces.
 ///
 /// Surfaces retain ownership of presentation, telemetry, async handles, and
-/// transcription destinations. This type centralizes valid state transitions
-/// and rejects completions from cancelled or superseded sessions.
+/// transcription destinations. Retaining and cancelling those handles ensures
+/// that only the current operation can advance this state machine.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct VoiceInputLifecycle {
     state: VoiceInputLifecycleState,
-    generation: u64,
 }
 
 impl VoiceInputLifecycle {
@@ -49,52 +48,46 @@ impl VoiceInputLifecycle {
         self.state
     }
 
-    pub fn generation(&self) -> u64 {
-        self.generation
-    }
-
     pub fn is_active(&self) -> bool {
-        self.state != VoiceInputLifecycleState::Idle
+        !matches!(self.state, VoiceInputLifecycleState::Idle)
     }
-
-    /// Starts a new generation when idle.
-    pub fn start(&mut self) -> Option<u64> {
+    /// Starts listening when idle.
+    pub fn start(&mut self) -> bool {
         if self.is_active() {
-            return None;
+            return false;
         }
-        self.generation = self.generation.wrapping_add(1);
         self.state = VoiceInputLifecycleState::Listening;
-        Some(self.generation)
+        true
     }
 
-    /// Advances the matching listening generation to transcription.
-    pub fn begin_transcribing(&mut self, generation: u64) -> bool {
-        if self.generation != generation || self.state != VoiceInputLifecycleState::Listening {
+    /// Advances listening to transcription.
+    pub fn begin_transcribing(&mut self) -> bool {
+        if !matches!(self.state, VoiceInputLifecycleState::Listening) {
             return false;
         }
         self.state = VoiceInputLifecycleState::Transcribing;
         true
     }
 
-    /// Completes the matching transcription generation.
-    pub fn complete(&mut self, generation: u64) -> bool {
-        if self.generation != generation || self.state != VoiceInputLifecycleState::Transcribing {
+    /// Completes transcription.
+    pub fn complete(&mut self) -> bool {
+        if !matches!(self.state, VoiceInputLifecycleState::Transcribing) {
             return false;
         }
         self.state = VoiceInputLifecycleState::Idle;
         true
     }
 
-    /// Fails the matching active generation.
-    pub fn fail(&mut self, generation: u64) -> bool {
-        if self.generation != generation || !self.is_active() {
+    /// Fails the current active operation.
+    pub fn fail(&mut self) -> bool {
+        if !self.is_active() {
             return false;
         }
         self.state = VoiceInputLifecycleState::Idle;
         true
     }
 
-    /// Cancels the current generation.
+    /// Cancels the current operation.
     pub fn cancel(&mut self) -> bool {
         if !self.is_active() {
             return false;

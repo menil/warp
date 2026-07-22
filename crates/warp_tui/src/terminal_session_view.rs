@@ -1243,12 +1243,13 @@ impl TuiTerminalSessionView {
                         let result = VoiceInput::handle(ctx)
                             .update(ctx, |voice_input, ctx| voice_input.stop_listening(ctx));
                         if let Err(error) = result {
+                            if let Some(handle) = view.voice_session_handle.take() {
+                                handle.abort();
+                            }
+                            VoiceInput::handle(ctx)
+                                .update(ctx, |voice_input, _| voice_input.abort_listening());
                             view.voice_input_model.update(ctx, |voice, ctx| {
-                                voice.fail(
-                                    voice.generation(),
-                                    "Failed to stop voice input".to_owned(),
-                                    ctx,
-                                );
+                                voice.fail("Failed to stop voice input".to_owned(), ctx);
                             });
                             report_error!(error.context("Failed to stop TUI voice input"));
                         } else {
@@ -2680,35 +2681,31 @@ impl TuiTerminalSessionView {
         self.voice_input_model.update(ctx, |voice, ctx| {
             voice.start(ctx);
         });
-        let generation = self.voice_input_model.as_ref(ctx).generation();
         self.voice_session_handle = Some(ctx.spawn(
             async move { session.await_result().await },
-            move |view, result, ctx| view.handle_voice_session_result(generation, result, ctx),
+            Self::handle_voice_session_result,
         ));
         record_static_slash_command_accepted("/voice", true, ctx);
         ctx.notify();
     }
 
-    /// Starts transcription for audio returned by the current recording
-    /// session, ignoring results from a superseded voice generation.
+    /// Starts transcription for audio returned by the current recording session.
     fn handle_voice_session_result(
         &mut self,
-        generation: u64,
         result: VoiceSessionResult,
         ctx: &mut ViewContext<Self>,
     ) {
         self.voice_session_handle = None;
-        if !self
-            .voice_input_model
-            .as_ref(ctx)
-            .is_transcribing_generation(generation)
-        {
+        if !matches!(
+            self.voice_input_model.as_ref(ctx).state(),
+            TuiVoiceInputState::Transcribing
+        ) {
             return;
         }
         let VoiceSessionResult::Audio { wav_base64, .. } = result else {
             let hint = "Voice input stopped";
             self.voice_input_model.update(ctx, |voice, ctx| {
-                voice.fail(generation, hint.to_owned(), ctx);
+                voice.fail(hint.to_owned(), ctx);
             });
             self.show_transient_hint(hint.to_owned(), ctx);
             return;
@@ -2716,7 +2713,7 @@ impl TuiTerminalSessionView {
         let Some(transcriber) = VoiceTranscriber::as_ref(ctx).transcriber().cloned() else {
             let hint = "Voice transcription is unavailable";
             self.voice_input_model.update(ctx, |voice, ctx| {
-                voice.fail(generation, hint.to_owned(), ctx);
+                voice.fail(hint.to_owned(), ctx);
             });
             self.show_transient_hint(hint.to_owned(), ctx);
             return;
@@ -2727,34 +2724,26 @@ impl TuiTerminalSessionView {
         VoiceInput::handle(ctx).update(ctx, |voice, _| voice.set_transcribing_active(true));
         self.voice_transcription_handle = Some(ctx.spawn(
             async move { transcriber.transcribe(wav_base64, language).await },
-            move |view, result, ctx| {
-                view.handle_voice_transcription_result(generation, result, ctx);
-            },
+            Self::handle_voice_transcription_result,
         ));
         ctx.notify();
     }
 
-    /// Applies a transcription to the input for the matching voice generation
-    /// and returns the voice model to idle on success or failure.
+    /// Applies a transcription to the input and returns the voice model to idle.
     fn handle_voice_transcription_result(
         &mut self,
-        generation: u64,
         result: Result<String, TranscribeError>,
         ctx: &mut ViewContext<Self>,
     ) {
         self.voice_transcription_handle = None;
-        if !self
-            .voice_input_model
-            .as_ref(ctx)
-            .is_transcribing_generation(generation)
-        {
+        if self.voice_input_model.as_ref(ctx).state() != TuiVoiceInputState::Transcribing {
             return;
         }
         VoiceInput::handle(ctx).update(ctx, |voice, _| voice.set_transcribing_active(false));
         match result {
             Ok(text) if !text.trim().is_empty() => {
                 self.voice_input_model.update(ctx, |voice, ctx| {
-                    voice.complete(generation, text.clone(), ctx);
+                    voice.complete(text.clone(), ctx);
                 });
                 self.input_view.update(ctx, |input, ctx| {
                     input.insert_text(&text, ctx);
@@ -2762,7 +2751,7 @@ impl TuiTerminalSessionView {
             }
             Ok(_) => {
                 self.voice_input_model.update(ctx, |voice, ctx| {
-                    voice.complete(generation, String::new(), ctx);
+                    voice.complete(String::new(), ctx);
                 });
             }
             Err(error) => {
@@ -2772,7 +2761,7 @@ impl TuiTerminalSessionView {
                     _ => "Failed to transcribe voice input",
                 };
                 self.voice_input_model.update(ctx, |voice, ctx| {
-                    voice.fail(generation, hint.to_owned(), ctx);
+                    voice.fail(hint.to_owned(), ctx);
                 });
                 self.show_transient_hint(hint.to_owned(), ctx);
             }
