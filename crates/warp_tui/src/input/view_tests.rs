@@ -226,6 +226,79 @@ fn slash_command_argument_hint_renders_after_menu_closes() {
 }
 
 #[test]
+fn enter_and_escape_stop_listening_while_escape_cancels_transcribing() {
+    App::test((), |mut app| async move {
+        let (view, voice_input, stops, cancels, submissions) = app.update(|ctx| {
+            let (view, voice_input) = build_view_with_voice(ctx);
+            let stops = Rc::new(Cell::new(0));
+            let stops_for_subscription = stops.clone();
+            let cancels = Rc::new(Cell::new(0));
+            let cancels_for_subscription = cancels.clone();
+            let submissions = Rc::new(RefCell::new(Vec::new()));
+            let submissions_for_subscription = submissions.clone();
+            ctx.subscribe_to_view(&view, move |_, event, _| match event {
+                TuiInputViewEvent::VoiceStop => {
+                    stops_for_subscription.set(stops_for_subscription.get() + 1);
+                }
+                TuiInputViewEvent::VoiceCancel => {
+                    cancels_for_subscription.set(cancels_for_subscription.get() + 1);
+                }
+                TuiInputViewEvent::Submitted(text) => {
+                    submissions_for_subscription.borrow_mut().push(text.clone());
+                }
+                TuiInputViewEvent::Pasted(_)
+                | TuiInputViewEvent::BackspaceAtEmptyInput
+                | TuiInputViewEvent::AcceptedSlashCommand(_)
+                | TuiInputViewEvent::AcceptedConversation(_)
+                | TuiInputViewEvent::AcceptedModel(_)
+                | TuiInputViewEvent::AcceptedMcp(_)
+                | TuiInputViewEvent::MoveFocusUp
+                | TuiInputViewEvent::AcceptedPromptHistory(_) => {}
+            });
+            (view, voice_input, stops, cancels, submissions)
+        });
+
+        app.update(|ctx| {
+            voice_input.update(ctx, |voice, ctx| {
+                assert!(voice.start(ctx));
+            });
+            dispatch(&view, ctx, &[TuiInputAction::Submit]);
+        });
+        assert_eq!(stops.get(), 1);
+        assert_eq!(cancels.get(), 0);
+        assert!(submissions.borrow().is_empty());
+
+        app.update(|ctx| {
+            voice_input.update(ctx, |voice, ctx| {
+                assert!(voice.cancel(ctx));
+                assert!(voice.start(ctx));
+            });
+            dispatch(&view, ctx, &[TuiInputAction::HandleEscape]);
+        });
+        assert_eq!(stops.get(), 2);
+        assert_eq!(cancels.get(), 0);
+        assert!(submissions.borrow().is_empty());
+
+        app.update(|ctx| {
+            voice_input.update(ctx, |voice, ctx| {
+                assert!(voice.stop(ctx));
+            });
+            dispatch(&view, ctx, &[TuiInputAction::Submit]);
+        });
+        assert_eq!(stops.get(), 2);
+        assert_eq!(cancels.get(), 0);
+        assert_eq!(submissions.borrow().as_slice(), &[""]);
+
+        app.update(|ctx| {
+            dispatch(&view, ctx, &[TuiInputAction::HandleEscape]);
+        });
+        assert_eq!(stops.get(), 2);
+        assert_eq!(cancels.get(), 1);
+        assert_eq!(submissions.borrow().as_slice(), &[""]);
+    });
+}
+
+#[test]
 fn agent_mode_placeholder_hint_renders_only_while_empty() {
     App::test((), |mut app| async move {
         app.update(|ctx| {
@@ -877,7 +950,8 @@ fn multiline_paste_emits_once_and_fallback_inserts_without_submitting() {
                 | TuiInputViewEvent::AcceptedMcp(_)
                 | TuiInputViewEvent::AcceptedPromptHistory(_)
                 | TuiInputViewEvent::BackspaceAtEmptyInput
-                | TuiInputViewEvent::VoiceEscape
+                | TuiInputViewEvent::VoiceStop
+                | TuiInputViewEvent::VoiceCancel
                 | TuiInputViewEvent::MoveFocusUp => {}
             });
             (view, pasted, submitted)

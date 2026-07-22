@@ -34,7 +34,6 @@ const NUM_TIMES_TO_SHOW_VOICE_NEW_FEATURE_POPUP: usize = 4;
 #[derive(Debug, Default, Clone)]
 pub(super) struct VoiceInputState {
     lifecycle: VoiceInputLifecycle,
-    session_handle: Option<SpawnedFutureHandle>,
     transcription_handle: Option<SpawnedFutureHandle>,
 }
 
@@ -176,10 +175,6 @@ impl EditorView {
     pub(super) fn stop_transcribing_voice_input(&mut self, ctx: &mut ViewContext<Self>) {
         VoiceInput::handle(ctx).update(ctx, |voice, _| voice.set_transcribing_active(false));
         let mut state = self.voice_input_state.clone();
-        if let Some(handle) = state.session_handle.take() {
-            log::debug!("Aborting voice input session");
-            handle.abort();
-        }
         if let Some(handle) = state.transcription_handle.take() {
             log::debug!("Aborting voice input transcription");
             handle.abort();
@@ -296,14 +291,17 @@ impl EditorView {
                     };
 
                     let mut state = self.voice_input_state.clone();
-                    if !state.lifecycle.start() {
+                    let Some(generation) = state.lifecycle.start() else {
                         return false;
-                    }
-                    state.session_handle = Some(ctx.spawn(
-                        async move { session.await_result().await },
-                        Self::handle_voice_session_result,
-                    ));
+                    };
                     self.set_voice_input_state(state, ctx);
+
+                    ctx.spawn(
+                        async move { session.await_result().await },
+                        move |view, result, ctx| {
+                            view.handle_voice_session_result(generation, result, ctx);
+                        },
+                    );
 
                     // Send telemetry for start
                     let is_udi_enabled = crate::settings::InputSettings::handle(ctx)
@@ -412,15 +410,11 @@ impl EditorView {
     /// This is called when the VoiceSession future resolves.
     pub(super) fn handle_voice_session_result(
         &mut self,
+        generation: u64,
         result: VoiceSessionResult,
         ctx: &mut ViewContext<Self>,
     ) {
-        let mut state = self.voice_input_state.clone();
-        state.session_handle = None;
         if !UserWorkspaces::handle(ctx).as_ref(ctx).is_voice_enabled() {
-            if state.lifecycle.fail() {
-                self.set_voice_input_state(state, ctx);
-            }
             return;
         }
 
@@ -455,7 +449,8 @@ impl EditorView {
                     let language = AISettings::as_ref(ctx)
                         .voice_input_language_code()
                         .map(str::to_owned);
-                    if !state.lifecycle.begin_transcribing() {
+                    let mut state = self.voice_input_state.clone();
+                    if !state.lifecycle.begin_transcribing(generation) {
                         return;
                     }
 
@@ -465,11 +460,16 @@ impl EditorView {
 
                     state.transcription_handle = Some(ctx.spawn(
                         async move { transcriber.transcribe(wav_base64, language).await },
-                        Self::apply_transcribed_voice_input,
+                        move |view, result, ctx| {
+                            view.apply_transcribed_voice_input(generation, result, ctx);
+                        },
                     ));
                     self.set_voice_input_state(state, ctx);
-                } else if state.lifecycle.fail() {
-                    self.set_voice_input_state(state, ctx);
+                } else {
+                    let mut state = self.voice_input_state.clone();
+                    if state.lifecycle.fail(generation) {
+                        self.set_voice_input_state(state, ctx);
+                    }
                 }
             }
             VoiceSessionResult::Aborted {
@@ -487,7 +487,8 @@ impl EditorView {
                     ctx
                 );
 
-                if state.lifecycle.fail() {
+                let mut state = self.voice_input_state.clone();
+                if state.lifecycle.fail(generation) {
                     self.set_voice_input_state(state, ctx);
                 }
             }
@@ -497,6 +498,7 @@ impl EditorView {
 
     fn apply_transcribed_voice_input(
         &mut self,
+        generation: u64,
         result: Result<String, TranscribeError>,
         ctx: &mut ViewContext<Self>,
     ) {
@@ -506,7 +508,7 @@ impl EditorView {
         }
 
         let mut state = self.voice_input_state.clone();
-        if !state.lifecycle.complete() {
+        if !state.lifecycle.complete(generation) {
             return;
         }
         state.transcription_handle = None;

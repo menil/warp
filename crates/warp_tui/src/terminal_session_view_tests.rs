@@ -1036,7 +1036,7 @@ fn footer_renders_voice_listening_and_transcribing_states() {
         });
         assert_eq!(
             render_footer_lines(&mut app, &view, false, 80),
-            vec!["voice mode · esc to stop"]
+            vec!["voice mode · esc or enter to stop"]
         );
 
         view.update(&mut app, |view, ctx| {

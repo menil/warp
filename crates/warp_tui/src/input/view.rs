@@ -53,7 +53,7 @@ use crate::keybindings::{
 };
 use crate::transcript_view::TuiTranscriptView;
 use crate::tui_builder::TuiUiBuilder;
-use crate::voice_input::TuiVoiceInputModel;
+use crate::voice_input::{TuiVoiceInputModel, TuiVoiceInputState};
 
 /// Keymap-context flag set while the input has contextual Escape behavior.
 ///
@@ -121,8 +121,10 @@ pub enum TuiInputViewEvent {
     AcceptedModel(LLMId),
     /// The user selected an action from the MCP menu.
     AcceptedMcp(TuiMcpAction),
-    /// Escape was consumed by a slash-originated voice session.
-    VoiceEscape,
+    /// Listening should stop and transcription should begin.
+    VoiceStop,
+    /// The pending voice transcription should be cancelled.
+    VoiceCancel,
     /// Shift+Up should move focus from the first visual row to the region above.
     MoveFocusUp,
     /// The user accepted a prompt from the up-arrow prompt-history menu. Carries
@@ -574,7 +576,9 @@ impl TypedActionView for TuiInputView {
                 }
             }
             TuiInputAction::Submit => {
-                self.submit(ctx);
+                if !self.handle_voice_submit(ctx) {
+                    self.submit(ctx);
+                }
                 TuiEditorInteractionOutcome::FollowCursor
             }
             TuiInputAction::HandleEscape => {
@@ -785,6 +789,16 @@ impl TuiInputView {
         ctx.emit(TuiInputViewEvent::Submitted(text));
     }
 
+    fn handle_voice_submit(&mut self, ctx: &mut ViewContext<Self>) -> bool {
+        match self.voice_input.as_ref(ctx).state() {
+            TuiVoiceInputState::Listening => {
+                ctx.emit(TuiInputViewEvent::VoiceStop);
+                true
+            }
+            TuiVoiceInputState::Idle | TuiVoiceInputState::Transcribing => false,
+        }
+    }
+
     fn handle_inline_menu_action(
         &mut self,
         action: &TuiInputAction,
@@ -854,9 +868,16 @@ impl TuiInputView {
             return true;
         }
 
-        if self.voice_is_active(ctx) {
-            ctx.emit(TuiInputViewEvent::VoiceEscape);
-            return true;
+        match self.voice_input.as_ref(ctx).state() {
+            TuiVoiceInputState::Listening => {
+                ctx.emit(TuiInputViewEvent::VoiceStop);
+                return true;
+            }
+            TuiVoiceInputState::Transcribing => {
+                ctx.emit(TuiInputViewEvent::VoiceCancel);
+                return true;
+            }
+            TuiVoiceInputState::Idle => {}
         }
 
         if self.is_shell_mode(ctx) {
