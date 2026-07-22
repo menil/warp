@@ -62,7 +62,7 @@ pub use crate::ai::blocklist::diff_storage::{
 };
 pub use crate::ai::blocklist::diff_types::{DiffSessionType, FileDiff, changed_lines_from_op};
 pub use crate::ai::blocklist::history_model::{
-    BlocklistAIHistoryEvent, BlocklistAIHistoryModel, CloudConversationData,
+    AIQueryHistory, BlocklistAIHistoryEvent, BlocklistAIHistoryModel, CloudConversationData,
     ConversationStatusUpdate,
 };
 pub use crate::ai::blocklist::orchestration_event_streamer::{
@@ -76,8 +76,8 @@ pub use crate::ai::blocklist::orchestration_topology::{
     resolve_orchestration_participant,
 };
 pub use crate::ai::blocklist::view_util::{
-    FailedOutputPresentation, failed_output_presentation, format_credits,
-    should_show_failed_output_usage_notice,
+    FAILED_OUTPUT_USAGE_NOTICE_TEXT, FailedOutputPresentation, OUT_OF_CREDITS_SUBSCRIBE_LABEL,
+    failed_output_presentation, format_credits, should_show_failed_output_usage_notice,
 };
 pub use crate::ai::blocklist::{
     AIActionStatus, AskUserQuestionExecutor, AttachmentType, BlocklistAIActionEvent,
@@ -135,6 +135,9 @@ pub use crate::persistence::PersistenceWriter;
 pub use crate::search::slash_command_menu::static_commands::commands::{
     self as slash_commands, COMMAND_REGISTRY,
 };
+pub use crate::search::slash_command_menu::static_commands::{
+    SlashCommandKind, SlashCommandSurfaces,
+};
 pub use crate::search::slash_command_menu::{SlashCommandId, StaticCommand};
 pub use crate::server::server_api::ServerApiProvider;
 pub use crate::server::server_api::ai::{
@@ -162,11 +165,11 @@ pub use crate::terminal::input::slash_command_model::{
 pub use crate::terminal::input::slash_commands::{
     AcceptSlashCommandOrSavedPrompt, InlineItem, SlashCommandDataSource, SlashCommandMixer,
     SlashCommandSelectionBehavior, TuiDataSourceArgs as TuiSlashCommandDataSourceArgs,
-    TuiSlashCommand, TuiSlashCommandDataSource, TuiZeroStateDataSource, UpdatedActiveCommands,
-    build_slash_command_mixer, record_saved_prompt_accepted, record_static_slash_command_accepted,
-    saved_prompt_text_for_id, should_close_slash_command_menu_for_exact_match,
-    slash_command_is_submitted_as_prompt, slash_command_is_supported_in_tui, slash_command_query,
-    slash_command_selection_behavior,
+    TuiSlashCommandDataSource, TuiZeroStateDataSource, UpdatedActiveCommands,
+    build_slash_command_mixer, record_autodetection_toggle_from_slash_command,
+    record_saved_prompt_accepted, record_static_slash_command_accepted, saved_prompt_text_for_id,
+    should_close_slash_command_menu_for_exact_match, slash_command_is_submitted_as_prompt,
+    slash_command_query, slash_command_selection_behavior,
 };
 pub use crate::terminal::local_tty::{
     TerminalManager as LocalTtyTerminalManager, TerminalManagerInit, TerminalSurfaceInit,
@@ -193,16 +196,18 @@ pub use crate::terminal::view::{ExecuteCommandEvent, WAKEUP_THROTTLE_PERIOD};
 pub use crate::terminal::{
     BlockPadding, PtyIntent, PtyIntentEvent, ShellLaunchData, SizeInfo, SizeUpdate,
     TerminalManager as TerminalManagerTrait, TerminalModel, TerminalSurface,
+    prompt_history_for_terminal_view,
 };
 pub use crate::themes::default_themes::{dark_theme, light_theme};
 pub use crate::throttle::throttle;
 pub use crate::tui::{
     TuiMcpAction, TuiMcpConfigState, TuiMcpManager, TuiMcpManagerEvent, TuiMcpServerId,
-    TuiMcpServerSnapshot, TuiMcpServerStatus, TuiMcpSnapshot, TuiMcpTransport,
+    TuiMcpServerSnapshot, TuiMcpServerStatus, TuiMcpSnapshot, TuiMcpTransport, log_out_tui,
 };
 #[cfg(any(test, feature = "test-util"))]
 pub use crate::tui_test_support::{
-    queue_tui_permission_action, register_tui_session_view_test_singletons,
+    blocklist_ai_history_model_with_queries, queue_tui_permission_action,
+    register_tui_session_view_test_singletons,
 };
 pub use crate::util::image::{
     MAX_IMAGE_COUNT_FOR_QUERY, MAX_IMAGE_SIZE_BYTES, MIME_SNIFF_BYTES, ProcessImageResult,

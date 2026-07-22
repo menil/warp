@@ -481,6 +481,7 @@ impl TuiOrchestrationBlock {
         self.selector.update(ctx, |selector, ctx| {
             selector.set_page(selector_page, ctx);
         });
+        ctx.focus(&self.selector);
         ctx.emit(TuiOrchestrationBlockEvent::BlockingStateChanged);
         ctx.notify();
     }
@@ -607,7 +608,8 @@ impl TuiOrchestrationBlock {
                     self.finish_page_confirmation(ConfigPage::Host, ctx);
                 }
             }
-            TuiOptionSelectorEvent::CustomTextOpened => {}
+            TuiOptionSelectorEvent::CustomTextOpened | TuiOptionSelectorEvent::CustomTextClosed => {
+            }
             TuiOptionSelectorEvent::RetryRequested => {
                 self.pending_page_navigation = None;
                 self.ensure_auth_secrets_fetched(ctx);
