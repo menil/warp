@@ -48,6 +48,7 @@ use crate::prompt_history_menu::TuiPromptHistoryMenuModel;
 use crate::slash_commands::{TuiSlashCommandModel, TuiSlashCommandRow};
 use crate::test_fixtures::{add_test_conversation_selection, add_test_semantic_selection};
 use crate::tui_builder::TuiUiBuilder;
+use crate::voice_input::TuiVoiceInputModel;
 
 const W: u16 = 80;
 
@@ -477,6 +478,59 @@ fn typeahead_overwrites_incremental_prefix_and_moves_cursor_to_end() {
         });
     });
 }
+fn build_view_with_voice(
+    ctx: &mut AppContext,
+) -> (ViewHandle<TuiInputView>, ModelHandle<TuiVoiceInputModel>) {
+    ctx.add_singleton_model(|_| Appearance::mock());
+    add_test_semantic_selection(ctx);
+    let input_mode = BlocklistAIInputModel::mock(Rc::new(TestInputModePolicy), ctx);
+    let suggestions_mode = add_suggestions_mode(ctx, TuiInputSuggestionsMode::Closed);
+    let voice_input = ctx.add_model(TuiVoiceInputModel::new);
+    let voice_input_for_view = voice_input.clone();
+    let (_window_id, view) = ctx.add_tui_window(
+        AddWindowOptions {
+            window_style: WindowStyle::NotStealFocus,
+            ..Default::default()
+        },
+        move |ctx| {
+            let model = ctx.add_model(|ctx| CodeEditorModel::new_tui(W, ctx));
+            TuiInputView::new_for_test(
+                model,
+                input_mode,
+                suggestions_mode,
+                Vec::new(),
+                |_| false,
+                ctx,
+            )
+            .with_voice_input(voice_input_for_view, ctx)
+        },
+    );
+    (view, voice_input)
+}
+
+#[test]
+fn listening_voice_input_suppresses_shell_gutter() {
+    App::test((), |mut app| async move {
+        app.update(|ctx| {
+            let (view, voice_input) = build_view_with_voice(ctx);
+            type_str(&view, ctx, "!");
+            assert!(view.as_ref(ctx).is_shell_mode(ctx));
+
+            voice_input.update(ctx, |voice, ctx| {
+                assert!(voice.start(ctx));
+            });
+            let lines = render_element_lines(view.as_ref(ctx).render(ctx), ctx, W, 4);
+            assert!(
+                !lines.iter().any(|line| line.starts_with('!')),
+                "voice mode must not render the shell gutter: {lines:?}"
+            );
+            assert!(
+                !lines.join("\n").contains("! "),
+                "voice mode must not render a replacement gutter glyph"
+            );
+        });
+    });
+}
 
 fn build_view_with_conversation_menu(
     ctx: &mut AppContext,
@@ -825,6 +879,7 @@ fn multiline_paste_emits_once_and_fallback_inserts_without_submitting() {
                 | TuiInputViewEvent::AcceptedMcp(_)
                 | TuiInputViewEvent::AcceptedPromptHistory(_)
                 | TuiInputViewEvent::BackspaceAtEmptyInput
+                | TuiInputViewEvent::VoiceEscape
                 | TuiInputViewEvent::MoveFocusUp => {}
             });
             (view, pasted, submitted)

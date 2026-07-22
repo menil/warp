@@ -147,6 +147,7 @@ pub enum TuiSlashCommand {
     ViewLogs,
     EnableNaturalLanguageDetection,
     DisableNaturalLanguageDetection,
+    Voice,
 }
 
 impl TuiSlashCommand {
@@ -174,6 +175,7 @@ impl TuiSlashCommand {
             name if name == commands::DISABLE_NATURAL_LANGUAGE_DETECTION.name => {
                 Some(Self::DisableNaturalLanguageDetection)
             }
+            name if name == commands::VOICE.name => Some(Self::Voice),
             _ => None,
         }
     }

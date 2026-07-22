@@ -66,6 +66,20 @@ pub const VIEW_LOGS: StaticCommand = StaticCommand {
     auto_enter_ai_mode: false,
     argument: None,
 };
+/// Starts the headless TUI voice-input session.
+///
+/// This command is intentionally added to the registry only from the
+/// `SettingsMode::Tui` branch below. Keeping the static definition here lets
+/// the shared availability machinery apply its normal AI/cloud gates without
+/// exposing the command to GUI or cloud composition surfaces.
+pub const VOICE: StaticCommand = StaticCommand {
+    name: "/voice",
+    description: "Start voice input",
+    icon_path: "bundled/svg/microphone-01.svg",
+    availability: Availability::AI_ENABLED.union(Availability::NOT_CLOUD_AGENT),
+    auto_enter_ai_mode: false,
+    argument: None,
+};
 
 pub const ENABLE_NATURAL_LANGUAGE_DETECTION: StaticCommand = StaticCommand {
     name: "/enable-natural-language-detection",
@@ -715,6 +729,7 @@ fn all_commands(settings_mode: settings::SettingsMode) -> Vec<StaticCommand> {
             VIEW_LOGS,
             ENABLE_NATURAL_LANGUAGE_DETECTION,
             DISABLE_NATURAL_LANGUAGE_DETECTION,
+            VOICE,
         ]);
     }
 

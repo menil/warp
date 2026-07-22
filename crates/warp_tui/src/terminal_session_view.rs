@@ -13,10 +13,10 @@ use warp::editor::{CodeEditorModel, CodeEditorModelEvent};
 use warp::settings::{AISettings, AISettingsChangedEvent};
 use warp::tui_export::{
     AIAgentActionId, AIAgentActionResultType, AIAgentContext, AIAgentPtyWriteMode, AIConversation,
-    AIConversationId, AcceptSlashCommandOrSavedPrompt, ActiveSession, ActiveSessionEvent,
-    AgentConversationEntryId, AgentConversationListEntryState, AgentConversationsModel,
-    AgentInteractionMetadata, AgentViewEntryOrigin, BlockId, BlocklistAIActionEvent,
-    BlocklistAIActionModel, BlocklistAIContextModel, BlocklistAIController,
+    AIConversationId, AIRequestUsageModel, AcceptSlashCommandOrSavedPrompt, ActiveSession,
+    ActiveSessionEvent, AgentConversationEntryId, AgentConversationListEntryState,
+    AgentConversationsModel, AgentInteractionMetadata, AgentViewEntryOrigin, BlockId,
+    BlocklistAIActionEvent, BlocklistAIActionModel, BlocklistAIContextModel, BlocklistAIController,
     BlocklistAIHistoryEvent, BlocklistAIHistoryModel, BlocklistAIInputModel, CLISubagentController,
     CLISubagentEvent, CLISubagentTarget, COMMAND_REGISTRY, CancellationReason, ChangelogModel,
     ChangelogRequestType, CloudConversationData, CommandExecutionSource, ConversationFileExport,
@@ -28,10 +28,11 @@ use warp::tui_export::{
     ServerConversationToken, ShellCommandExecutorEvent, SizeInfo, SizeUpdate, SkillReference,
     SlashCommandDataSource as _, SlashCommandSelectionBehavior, StartAgentExecutorEvent,
     StartAgentRequest, StaticCommand, TerminalModel, TerminalSurface, TerminalSurfaceInit,
-    TranscriptScope, TuiMcpAction, TuiMcpManager, TuiSlashCommand, TuiSlashCommandDataSource,
-    TuiSlashCommandDataSourceArgs, TuiZeroStateDataSource, UserTakeOverReason,
-    WAKEUP_THROTTLE_PERIOD, block_context_from_terminal_model, build_slash_command_mixer,
-    detect_possible_git_repo, export_conversation_markdown, log_out_tui,
+    TranscribeError, TranscriptScope, TuiMcpAction, TuiMcpManager, TuiSlashCommand,
+    TuiSlashCommandDataSource, TuiSlashCommandDataSourceArgs, TuiZeroStateDataSource,
+    UserTakeOverReason, UserWorkspaces, VoiceInput, VoiceInputToggledFrom, VoiceSessionResult,
+    VoiceTranscriber, WAKEUP_THROTTLE_PERIOD, block_context_from_terminal_model,
+    build_slash_command_mixer, detect_possible_git_repo, export_conversation_markdown, log_out_tui,
     maybe_build_ai_query_upsert_event, prepare_conversation_block_restoration,
     record_autodetection_toggle_from_slash_command, record_saved_prompt_accepted,
     record_static_slash_command_accepted, saved_prompt_text_for_id,
@@ -105,6 +106,7 @@ use crate::tui_builder::TuiUiBuilder;
 use crate::tui_cli_subagent_view::{HAND_BACK_KEY_BINDING, TuiCLISubagentView};
 use crate::ui::{compact_footer_path, conversation_restore_failed, conversation_restoring};
 use crate::usage::UsageToggle;
+use crate::voice_input::{TuiVoiceInputModel, TuiVoiceInputState};
 use crate::warping_indicator::{render_response_summary, render_warping_indicator_row};
 use crate::zero_state::TuiZeroStateView;
 mod input_detection;
@@ -192,6 +194,10 @@ fn log_bundle_success_message(path: &Path) -> String {
 
 fn raw_prompt_if_not_blank(input: &str) -> Option<&str> {
     (!input.trim().is_empty()).then_some(input)
+}
+
+fn voice_argument_is_empty(argument: Option<&String>) -> bool {
+    argument.is_none_or(|argument| argument.trim().is_empty())
 }
 
 /// Resolved segments for the footer's left-aligned sectioned status row.
@@ -458,6 +464,7 @@ pub(crate) struct TuiTerminalSessionView {
     orchestration_tab_bar: ViewHandle<TuiTabBarView>,
     orchestration_tabs_focused: bool,
     zero_state_view: ViewHandle<TuiZeroStateView>,
+    voice_input_model: ModelHandle<TuiVoiceInputModel>,
 }
 
 /// Registers the session surface's keybindings. Called once at TUI startup
@@ -976,6 +983,8 @@ impl TuiTerminalSessionView {
         });
         let input_editor_model =
             ctx.add_model(|ctx| CodeEditorModel::new_tui(INITIAL_INPUT_WIDTH, ctx));
+        let voice_input_model = ctx.add_model(TuiVoiceInputModel::new);
+        ctx.subscribe_to_model(&voice_input_model, |_, _, _, ctx| ctx.notify());
         let suggestions_mode = ctx.add_model(|_| TuiInputSuggestionsModeModel::new());
         let slash_commands_source = ctx.add_model(|ctx| {
             TuiSlashCommandDataSource::new(
@@ -1116,6 +1125,7 @@ impl TuiTerminalSessionView {
         let orchestration_tab_bar = ctx.add_typed_action_tui_view(|_| TuiTabBarView::empty());
         let orchestration_tab_bar_for_input = orchestration_tab_bar.clone();
         let input_editor_for_input = input_editor_model.clone();
+        let voice_input_model_for_input = voice_input_model.clone();
         let input_view = ctx.add_typed_action_tui_view(move |ctx| {
             TuiInputView::new(
                 input_editor_for_input,
@@ -1130,6 +1140,7 @@ impl TuiTerminalSessionView {
                 let terminal_model = terminal_model_for_input.lock();
                 tui_input_target(&terminal_model).agent_editor_owns_input()
             })
+            .with_voice_input(voice_input_model_for_input, ctx)
             .with_keyboard_enhancement_supported(keyboard_enhancement_supported)
         });
         let attachment_model = ctx.add_model(|ctx| {
@@ -1199,6 +1210,9 @@ impl TuiTerminalSessionView {
             }
             TuiInputViewEvent::AcceptedPromptHistory(text) => {
                 view.handle_accepted_prompt_history(text.clone(), ctx);
+            }
+            TuiInputViewEvent::VoiceEscape => {
+                view.handle_voice_escape(ctx);
             }
             TuiInputViewEvent::MoveFocusUp => {
                 view.focus_orchestration_tabs(ctx);
@@ -1435,6 +1449,7 @@ impl TuiTerminalSessionView {
             orchestration_tab_bar,
             orchestration_tabs_focused: false,
             zero_state_view,
+            voice_input_model,
         }
     }
 
@@ -2253,6 +2268,14 @@ impl TuiTerminalSessionView {
                     .finish(),
             );
         }
+        if let Some(status) = match self.voice_input_model.as_ref(ctx).state() {
+            TuiVoiceInputState::Listening => Some("voice mode · esc to stop"),
+            TuiVoiceInputState::Transcribing => Some("Transcribing..."),
+            TuiVoiceInputState::Idle => None,
+        } {
+            return TuiFlex::row()
+                .child(TuiText::new(status).with_style(muted).truncate().finish());
+        }
         // The orchestration-tab callout replaces the status row in agent mode;
         // shell mode wins so its first segment remains the shell indicator.
         let shell_mode = self.is_shell_mode(ctx);
@@ -2566,6 +2589,159 @@ impl TuiTerminalSessionView {
         }
     }
 
+    fn voice_available(&self, ctx: &AppContext) -> bool {
+        self.slash_commands_source
+            .as_ref(ctx)
+            .local_skills_available(ctx)
+            && AISettings::as_ref(ctx).is_voice_input_enabled(ctx)
+            && UserWorkspaces::as_ref(ctx).is_voice_enabled()
+            && AIRequestUsageModel::as_ref(ctx).can_request_voice()
+    }
+
+    fn handle_voice_escape(&mut self, ctx: &mut ViewContext<Self>) {
+        match self.voice_input_model.as_ref(ctx).state() {
+            TuiVoiceInputState::Listening => {
+                let result = VoiceInput::handle(ctx)
+                    .update(ctx, |voice_input, ctx| voice_input.stop_listening(ctx));
+                if let Err(error) = result {
+                    self.voice_input_model.update(ctx, |voice, ctx| {
+                        voice.fail(
+                            voice.generation(),
+                            "Failed to stop voice input".to_owned(),
+                            ctx,
+                        );
+                    });
+                    report_error!(error.context("Failed to stop TUI voice input"));
+                } else {
+                    self.voice_input_model
+                        .update(ctx, |voice, ctx| voice.stop(ctx));
+                }
+            }
+            // A second Escape while conversion/transcription is pending is a
+            // handled no-op; the in-flight future must not be cancelled.
+            TuiVoiceInputState::Transcribing => {}
+            TuiVoiceInputState::Idle => {}
+        }
+        ctx.notify();
+    }
+
+    fn start_voice_input(&mut self, ctx: &mut ViewContext<Self>) {
+        if !self.voice_available(ctx) {
+            self.show_transient_hint("Voice input is unavailable".to_owned(), ctx);
+            self.input_view.update(ctx, |input, ctx| input.clear(ctx));
+            return;
+        }
+        if self.voice_input_model.as_ref(ctx).is_active() {
+            return;
+        }
+
+        let session_result = VoiceInput::handle(ctx).update(ctx, |voice_input, ctx| {
+            voice_input.start_listening(ctx, VoiceInputToggledFrom::Button)
+        });
+        let session = match session_result {
+            Ok(session) => session,
+            Err(error) => {
+                let message = match error {
+                    warp::tui_export::StartListeningError::AccessDenied => {
+                        "Microphone access denied"
+                    }
+                    _ => "Unable to start voice input",
+                };
+                self.show_transient_hint(message.to_owned(), ctx);
+                self.input_view.update(ctx, |input, ctx| input.clear(ctx));
+                return;
+            }
+        };
+
+        self.input_view.update(ctx, |input, ctx| input.clear(ctx));
+        self.voice_input_model.update(ctx, |voice, ctx| {
+            voice.start(ctx);
+        });
+        let generation = self.voice_input_model.as_ref(ctx).generation();
+        ctx.spawn(
+            async move { session.await_result().await },
+            move |view, result, ctx| view.handle_voice_session_result(generation, result, ctx),
+        );
+        record_static_slash_command_accepted("/voice", true, ctx);
+        ctx.notify();
+    }
+
+    fn handle_voice_session_result(
+        &mut self,
+        generation: u64,
+        result: VoiceSessionResult,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        let TuiVoiceInputState::Transcribing = self.voice_input_model.as_ref(ctx).state() else {
+            return;
+        };
+        let VoiceSessionResult::Audio { wav_base64, .. } = result else {
+            let hint = "Voice input stopped";
+            self.voice_input_model.update(ctx, |voice, ctx| {
+                voice.fail(generation, hint.to_owned(), ctx);
+            });
+            self.show_transient_hint(hint.to_owned(), ctx);
+            return;
+        };
+        let Some(transcriber) = VoiceTranscriber::as_ref(ctx).transcriber().cloned() else {
+            let hint = "Voice transcription is unavailable";
+            self.voice_input_model.update(ctx, |voice, ctx| {
+                voice.fail(generation, hint.to_owned(), ctx);
+            });
+            self.show_transient_hint(hint.to_owned(), ctx);
+            return;
+        };
+        let language = AISettings::as_ref(ctx)
+            .voice_input_language_code()
+            .map(str::to_owned);
+        VoiceInput::handle(ctx).update(ctx, |voice, _| voice.set_transcribing_active(true));
+        ctx.spawn(
+            async move { transcriber.transcribe(wav_base64, language).await },
+            move |view, result, ctx| {
+                view.handle_voice_transcription_result(generation, result, ctx);
+            },
+        );
+        ctx.notify();
+    }
+
+    fn handle_voice_transcription_result(
+        &mut self,
+        generation: u64,
+        result: Result<String, TranscribeError>,
+        ctx: &mut ViewContext<Self>,
+    ) {
+        VoiceInput::handle(ctx).update(ctx, |voice, _| voice.set_transcribing_active(false));
+        match result {
+            Ok(text) if !text.trim().is_empty() => {
+                if self.voice_input_model.as_ref(ctx).state() == TuiVoiceInputState::Transcribing {
+                    self.voice_input_model.update(ctx, |voice, ctx| {
+                        voice.complete(generation, text.clone(), ctx);
+                    });
+                    self.input_view.update(ctx, |input, ctx| {
+                        input.insert_transcribed_text(&text, ctx);
+                    });
+                }
+            }
+            Ok(_) => {
+                self.voice_input_model.update(ctx, |voice, ctx| {
+                    voice.complete(generation, String::new(), ctx);
+                });
+            }
+            Err(error) => {
+                let hint = match error {
+                    TranscribeError::QuotaLimit => "Voice input limit reached",
+                    TranscribeError::ServerOverloaded => "Voice transcription is unavailable",
+                    _ => "Failed to transcribe voice input",
+                };
+                self.voice_input_model.update(ctx, |voice, ctx| {
+                    voice.fail(generation, hint.to_owned(), ctx);
+                });
+                self.show_transient_hint(hint.to_owned(), ctx);
+            }
+        }
+        ctx.notify();
+    }
+
     fn handle_submitted_input(&mut self, input: &str, ctx: &mut ViewContext<Self>) {
         if self.is_conversation_restore_loading() {
             return;
@@ -2864,6 +3040,14 @@ impl TuiTerminalSessionView {
                     },
                 );
                 record_static_slash_command_accepted(command.name, true, ctx);
+            }
+            TuiSlashCommand::Voice => {
+                if !voice_argument_is_empty(argument) {
+                    self.show_transient_hint("Usage: /voice (no arguments)".to_owned(), ctx);
+                    self.input_view.update(ctx, |input, ctx| input.clear(ctx));
+                    return;
+                }
+                self.start_voice_input(ctx);
             }
             TuiSlashCommand::CreateNewProject => {
                 let Some(query) = argument
