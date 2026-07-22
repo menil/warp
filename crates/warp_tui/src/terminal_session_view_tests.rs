@@ -107,6 +107,58 @@ fn inline_menu_padding_preserves_result_capacity() {
     });
 }
 
+#[test]
+fn listening_voice_input_animates_the_input_border() {
+    App::test((), |mut app| async move {
+        let fixture = focus_test_fixture(&mut app);
+        let (view, _) = add_focus_test_session(&mut app, &fixture, true);
+        view.update(&mut app, |view, ctx| {
+            view.terminal_model
+                .lock()
+                .simulate_block("echo ready", "ready\r\n");
+            assert!(
+                view.voice_input_model
+                    .update(ctx, |voice, ctx| { voice.start(ctx) })
+            );
+        });
+
+        let mut presenter = TuiPresenter::new();
+        let listening_frame = app.update(|ctx| {
+            let mut invalidation = WindowInvalidation::default();
+            invalidation.updated.insert(view.id());
+            invalidation
+                .updated
+                .extend(view.as_ref(ctx).child_view_ids(ctx));
+            presenter.invalidate(&invalidation, ctx, fixture.window_id);
+            presenter.present(ctx, &view, TuiRect::new(0, 0, 100, 40))
+        });
+        assert!(
+            listening_frame.repaint_at.is_some(),
+            "the listening border should schedule its next animation frame"
+        );
+
+        view.update(&mut app, |view, ctx| {
+            assert!(
+                view.voice_input_model
+                    .update(ctx, |voice, ctx| { voice.stop(ctx) })
+            );
+        });
+        let transcribing_frame = app.update(|ctx| {
+            let mut invalidation = WindowInvalidation::default();
+            invalidation.updated.insert(view.id());
+            invalidation
+                .updated
+                .extend(view.as_ref(ctx).child_view_ids(ctx));
+            presenter.invalidate(&invalidation, ctx, fixture.window_id);
+            presenter.present(ctx, &view, TuiRect::new(0, 0, 100, 40))
+        });
+        assert!(
+            transcribing_frame.repaint_at.is_none(),
+            "the border should stop animating after recording stops"
+        );
+    });
+}
+
 fn mouse_moved(x: u16, y: u16) -> TuiEvent {
     TuiEvent::MouseMoved {
         position: TuiPoint::new(x, y),
@@ -1036,7 +1088,7 @@ fn footer_renders_voice_listening_and_transcribing_states() {
         });
         assert_eq!(
             render_footer_lines(&mut app, &view, false, 80),
-            vec!["voice mode · esc or enter to stop"]
+            vec!["listening to voice input... · esc or enter to stop"]
         );
 
         view.update(&mut app, |view, ctx| {

@@ -5,6 +5,9 @@
 //! Composition and layout stay with the views and the element library; the
 //! builder only owns styles.
 
+use std::f32::consts::TAU;
+use std::time::Duration;
+
 use pathfinder_color::ColorU;
 use warp::tui_export::Appearance;
 use warp_core::ui::color::Opacity;
@@ -257,6 +260,25 @@ impl TuiUiBuilder {
         TuiStyle::default().fg(cell_color(
             self.base_background().blend(&accent.with_opacity(50)),
         ))
+    }
+
+    /// Smoothly pulsing border between `cyan_overlay_2` and full `cyan`.
+    pub(crate) fn voice_input_border_style(&self, elapsed: Duration) -> TuiStyle {
+        const PERIOD: Duration = Duration::from_secs(2);
+
+        let phase = elapsed.as_secs_f32() / PERIOD.as_secs_f32();
+        let intensity = (1.0 - (phase * TAU).cos()) * 0.5;
+        let cyan = ThemeFill::from(self.warp_theme.terminal_colors().normal.cyan);
+        let cyan_overlay_2 = self
+            .base_background()
+            .blend(&cyan.with_opacity(50))
+            .into_solid();
+        let cyan = cyan.into_solid();
+        let color = cyan_overlay_2
+            .to_f32()
+            .lerp(cyan.to_f32(), intensity)
+            .to_u8();
+        TuiStyle::default().fg(Color::Rgb(color.r, color.g, color.b))
     }
 
     /// Style in the shell-mode accent color (the same blue the GUI uses for

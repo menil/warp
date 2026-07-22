@@ -1,3 +1,5 @@
+use std::time::Duration;
+
 use pathfinder_color::ColorU;
 use warp::tui_export::light_theme;
 use warp_core::ui::color::blend::Blend;
@@ -100,5 +102,30 @@ fn selected_state_suffix_midpoint_matches_figma_dark_palette() {
             ColorU::new(180, 250, 114, u8::MAX),
         ),
         ColorU::new(93, 128, 60, u8::MAX)
+    );
+}
+
+#[test]
+fn voice_input_border_pulses_between_cyan_overlay_2_and_cyan() {
+    let theme = light_theme();
+    let builder = TuiUiBuilder {
+        warp_theme: theme.clone(),
+    };
+    let cyan = ThemeFill::from(theme.terminal_colors().normal.cyan);
+    let cyan_overlay_2: Color =
+        CoreFill::from(theme.background().blend(&cyan.with_opacity(50))).into();
+    let cyan: Color = CoreFill::from(cyan).into();
+
+    assert_eq!(
+        builder.voice_input_border_style(Duration::ZERO).fg,
+        Some(cyan_overlay_2)
+    );
+    assert_eq!(
+        builder.voice_input_border_style(Duration::from_secs(1)).fg,
+        Some(cyan)
+    );
+    assert_eq!(
+        builder.voice_input_border_style(Duration::from_secs(2)).fg,
+        Some(cyan_overlay_2)
     );
 }

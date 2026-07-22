@@ -46,9 +46,10 @@ use warp_util::local_or_remote_path::LocalOrRemotePath;
 use warpui::SingletonEntity;
 use warpui_core::r#async::{SpawnedFutureHandle, Timer};
 use warpui_core::elements::MouseStateHandle;
+use warpui_core::elements::animation::AnimationClock;
 use warpui_core::elements::tui::{
-    TuiChildView, TuiConstrainedBox, TuiContainer, TuiElement, TuiFlex, TuiHoverable, TuiSize,
-    TuiText,
+    TuiAnimated, TuiChildView, TuiConstrainedBox, TuiContainer, TuiElement, TuiFlex, TuiHoverable,
+    TuiSize, TuiStyle, TuiText,
 };
 use warpui_core::keymap::macros::*;
 use warpui_core::keymap::{self, EditableBinding, FixedBinding};
@@ -118,6 +119,7 @@ const INITIAL_INPUT_WIDTH: u16 = 80;
 const INLINE_MENU_TOP_PADDING_ROWS: u16 = 1;
 const MAX_INPUT_TEXT_ROWS: u16 = 6;
 const AUTO_APPROVE_FEEDBACK_DURATION: Duration = Duration::from_secs(3);
+const VOICE_INPUT_BORDER_REPAINT_INTERVAL: Duration = Duration::from_millis(33);
 
 /// The footer hint shown while the ctrl-c exit confirmation is armed.
 const CTRL_C_EXIT_HINT: &str = "ctrl-c again to exit";
@@ -225,6 +227,16 @@ fn raw_prompt_if_not_blank(input: &str) -> Option<&str> {
 
 fn voice_argument_is_empty(argument: Option<&String>) -> bool {
     argument.is_none_or(|argument| argument.trim().is_empty())
+}
+
+fn bordered_input(
+    input_view: &ViewHandle<TuiInputView>,
+    border_style: TuiStyle,
+) -> Box<dyn TuiElement> {
+    TuiContainer::new(TuiChildView::new(input_view).finish())
+        .with_padding_x(1)
+        .with_border_style(border_style)
+        .finish()
 }
 
 /// Resolved segments for the footer's left-aligned sectioned status row.
@@ -492,6 +504,7 @@ pub(crate) struct TuiTerminalSessionView {
     orchestration_tabs_focused: bool,
     zero_state_view: ViewHandle<TuiZeroStateView>,
     voice_input_model: ModelHandle<TuiVoiceInputModel>,
+    voice_input_animation_clock: AnimationClock,
     voice_transcription_handle: Option<SpawnedFutureHandle>,
 }
 
@@ -1475,6 +1488,7 @@ impl TuiTerminalSessionView {
             orchestration_tabs_focused: false,
             zero_state_view,
             voice_input_model,
+            voice_input_animation_clock: AnimationClock::starting_at(Duration::ZERO),
             voice_transcription_handle: None,
         }
     }
@@ -2269,7 +2283,9 @@ impl TuiTerminalSessionView {
         }
         match self.voice_input_model.as_ref(ctx).state() {
             TuiVoiceInputState::Listening => {
-                return Some(FooterHint::muted("voice mode · esc or enter to stop"));
+                return Some(FooterHint::muted(
+                    "listening to voice input... · esc or enter to stop",
+                ));
             }
             TuiVoiceInputState::Transcribing => {
                 return Some(FooterHint::muted("Transcribing... · esc to cancel"));
@@ -2639,6 +2655,7 @@ impl TuiTerminalSessionView {
         self.voice_input_model.update(ctx, |voice, ctx| {
             voice.start(ctx);
         });
+        self.voice_input_animation_clock = AnimationClock::starting_at(Duration::ZERO);
         let generation = self.voice_input_model.as_ref(ctx).generation();
         ctx.spawn(
             async move { session.await_result().await },
@@ -3523,11 +3540,27 @@ impl TuiView for TuiTerminalSessionView {
                     .finish(),
                 );
             }
-            let border_style = if self.is_shell_mode(ctx) {
-                builder.shell_mode_accent_style()
-            } else {
-                builder.accent_border_style()
-            };
+            let input =
+                if self.voice_input_model.as_ref(ctx).state() == TuiVoiceInputState::Listening {
+                    let input_view = self.input_view.clone();
+                    let builder = builder.clone();
+                    let clock = self.voice_input_animation_clock;
+                    TuiAnimated::new(VOICE_INPUT_BORDER_REPAINT_INTERVAL, move || {
+                        bordered_input(
+                            &input_view,
+                            builder.voice_input_border_style(clock.elapsed()),
+                        )
+                    })
+                    .finish()
+                } else {
+                    let border_style = if self.is_shell_mode(ctx) {
+                        builder.shell_mode_accent_style()
+                    } else {
+                        builder.accent_border_style()
+                    };
+                    bordered_input(&self.input_view, border_style)
+                };
+
             if self.attachment_bar.as_ref(ctx).should_render(ctx) {
                 content = content.child(
                     TuiConstrainedBox::new(
@@ -3540,14 +3573,9 @@ impl TuiView for TuiTerminalSessionView {
                 );
             }
             content = content.child(
-                TuiConstrainedBox::new(
-                    TuiContainer::new(TuiChildView::new(&self.input_view).finish())
-                        .with_padding_x(1)
-                        .with_border_style(border_style)
-                        .finish(),
-                )
-                .with_max_rows(MAX_INPUT_TEXT_ROWS + 2)
-                .finish(),
+                TuiConstrainedBox::new(input)
+                    .with_max_rows(MAX_INPUT_TEXT_ROWS + 2)
+                    .finish(),
             );
             let footer = if matches!(input_target, TuiInputTarget::Disabled) {
                 self.render_footer(orchestration_tabs_available, ctx)
