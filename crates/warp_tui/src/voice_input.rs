@@ -132,6 +132,10 @@ impl TuiVoiceInputModel {
         self.state != TuiVoiceInputState::Idle
     }
 
+    pub(crate) fn is_transcribing_generation(&self, generation: u64) -> bool {
+        self.state == TuiVoiceInputState::Transcribing && self.generation == generation
+    }
+
     pub(crate) fn start(&mut self, ctx: &mut ModelContext<Self>) -> bool {
         if self.state != TuiVoiceInputState::Idle {
             return false;
@@ -228,8 +232,10 @@ mod tests {
         assert_eq!(controller.start(), Ok(true));
         let second_generation = controller.generation();
         assert_ne!(first_generation, second_generation);
+        assert_eq!(controller.stop(), Ok(true));
         assert!(!controller.complete(first_generation, "stale".to_owned()));
-        assert_eq!(controller.state(), TuiVoiceInputState::Listening);
+        assert!(!controller.fail(first_generation));
+        assert_eq!(controller.state(), TuiVoiceInputState::Transcribing);
     }
 
     #[test]

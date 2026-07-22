@@ -41,11 +41,13 @@ fn slash_command_menu_renders_voice_row() {
                 mode.set_mode(TuiInputSuggestionsMode::SlashCommands, ctx);
             });
             let mixer = ctx.add_model(|_| SlashCommandMixer::new());
+            let conversation_selection = add_test_conversation_selection(ctx);
             let model = ctx.add_model(|_| {
                 TuiSlashCommandModel::new_for_test(
                     input_editor,
                     suggestions_mode,
                     mixer,
+                    conversation_selection,
                     vec![TuiSlashCommandRow {
                         title: "/voice".to_owned(),
                         description: Some("Start voice input".to_owned()),

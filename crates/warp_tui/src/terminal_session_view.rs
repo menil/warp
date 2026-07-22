@@ -2672,9 +2672,13 @@ impl TuiTerminalSessionView {
         result: VoiceSessionResult,
         ctx: &mut ViewContext<Self>,
     ) {
-        let TuiVoiceInputState::Transcribing = self.voice_input_model.as_ref(ctx).state() else {
+        if !self
+            .voice_input_model
+            .as_ref(ctx)
+            .is_transcribing_generation(generation)
+        {
             return;
-        };
+        }
         let VoiceSessionResult::Audio { wav_base64, .. } = result else {
             let hint = "Voice input stopped";
             self.voice_input_model.update(ctx, |voice, ctx| {
@@ -2710,17 +2714,22 @@ impl TuiTerminalSessionView {
         result: Result<String, TranscribeError>,
         ctx: &mut ViewContext<Self>,
     ) {
+        if !self
+            .voice_input_model
+            .as_ref(ctx)
+            .is_transcribing_generation(generation)
+        {
+            return;
+        }
         VoiceInput::handle(ctx).update(ctx, |voice, _| voice.set_transcribing_active(false));
         match result {
             Ok(text) if !text.trim().is_empty() => {
-                if self.voice_input_model.as_ref(ctx).state() == TuiVoiceInputState::Transcribing {
-                    self.voice_input_model.update(ctx, |voice, ctx| {
-                        voice.complete(generation, text.clone(), ctx);
-                    });
-                    self.input_view.update(ctx, |input, ctx| {
-                        input.insert_transcribed_text(&text, ctx);
-                    });
-                }
+                self.voice_input_model.update(ctx, |voice, ctx| {
+                    voice.complete(generation, text.clone(), ctx);
+                });
+                self.input_view.update(ctx, |input, ctx| {
+                    input.insert_transcribed_text(&text, ctx);
+                });
             }
             Ok(_) => {
                 self.voice_input_model.update(ctx, |voice, ctx| {

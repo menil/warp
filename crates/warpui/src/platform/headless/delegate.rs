@@ -2,12 +2,29 @@ use std::mem::ManuallyDrop;
 use std::sync::{Arc, OnceLock};
 use std::thread;
 
+#[cfg(target_os = "macos")]
+use objc2_av_foundation::{AVAuthorizationStatus, AVCaptureDevice, AVMediaTypeAudio};
 use parking_lot::Mutex;
 
 use super::event_loop::{AppEvent, EventSender};
 use crate::clipboard::InMemoryClipboard;
 use crate::notification::{NotificationSendError, RequestPermissionsOutcome};
 use crate::platform::{self, Cursor};
+
+#[cfg(target_os = "macos")]
+fn macos_microphone_access_state() -> platform::MicrophoneAccessState {
+    let media_type = unsafe { AVMediaTypeAudio };
+    let Some(media_type) = media_type else {
+        return platform::MicrophoneAccessState::NotDetermined;
+    };
+    let status = unsafe { AVCaptureDevice::authorizationStatusForMediaType(media_type) };
+    match status {
+        AVAuthorizationStatus::Restricted => platform::MicrophoneAccessState::Restricted,
+        AVAuthorizationStatus::Denied => platform::MicrophoneAccessState::Denied,
+        AVAuthorizationStatus::Authorized => platform::MicrophoneAccessState::Authorized,
+        _ => platform::MicrophoneAccessState::NotDetermined,
+    }
+}
 
 /// Stores the ID of the application's main thread, which we can reference
 /// to determine if a given thread is the main thread or not.
@@ -186,16 +203,15 @@ impl platform::Delegate for AppDelegate {
         // delegates. On platforms where cpal is the permission/device probe,
         // let the recorder perform that probe; an explicit environment
         // override keeps CI and fixture runs deterministic. A headless
-        // process cannot query AVCaptureDevice authorization without
-        // a GUI permission flow, so fail deterministically rather than treating
-        // `NotDetermined` as authorized. The GUI delegate retains its existing
-        // macOS authorization semantics.
+        // process can still query the existing OS authorization state without
+        // invoking a GUI permission prompt; `NotDetermined` remains distinct
+        // from an explicit denial. The GUI delegates remain unchanged.
         if std::env::var_os("WARP_TUI_MICROPHONE_DENIED").is_some() {
             return platform::MicrophoneAccessState::Denied;
         }
         #[cfg(target_os = "macos")]
         {
-            platform::MicrophoneAccessState::Denied
+            macos_microphone_access_state()
         }
         #[cfg(not(target_os = "macos"))]
         {

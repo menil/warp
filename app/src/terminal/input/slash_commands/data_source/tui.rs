@@ -18,7 +18,7 @@ use crate::search::SyncDataSource;
 use crate::search::data_source::{Query, QueryResult};
 use crate::search::mixer::DataSourceRunErrorWrapper;
 use crate::search::slash_command_menu::static_commands::Availability;
-use crate::search::slash_command_menu::static_commands::commands::COMMAND_REGISTRY;
+use crate::search::slash_command_menu::static_commands::commands::{COMMAND_REGISTRY, VOICE};
 #[cfg(feature = "voice_input")]
 use crate::settings::AISettings;
 use crate::terminal::TerminalModel;
@@ -37,6 +37,11 @@ fn voice_command_gates_pass(
     local_routing: bool,
 ) -> bool {
     ai_enabled && team_enabled && quota_available && local_routing
+}
+
+#[cfg(any(not(feature = "voice_input"), test))]
+fn voice_command_is_allowed_for_build(command_name: &str, voice_input_enabled: bool) -> bool {
+    voice_input_enabled || command_name != VOICE.name
 }
 
 pub struct TuiDataSourceArgs {
@@ -159,8 +164,7 @@ impl TuiSlashCommandDataSource {
         command: &crate::search::slash_command_menu::StaticCommand,
         ctx: &AppContext,
     ) -> bool {
-        if command.name != crate::search::slash_command_menu::static_commands::commands::VOICE.name
-        {
+        if command.name != VOICE.name {
             return true;
         }
 
@@ -175,10 +179,10 @@ impl TuiSlashCommandDataSource {
     #[cfg(not(feature = "voice_input"))]
     fn command_passes_voice_gates(
         &self,
-        _command: &crate::search::slash_command_menu::StaticCommand,
+        command: &crate::search::slash_command_menu::StaticCommand,
         _ctx: &AppContext,
     ) -> bool {
-        false
+        voice_command_is_allowed_for_build(command.name, false)
     }
 }
 
@@ -223,6 +227,23 @@ impl Entity for TuiSlashCommandDataSource {
 #[cfg(test)]
 mod tests {
     use super::voice_command_gates_pass;
+    #[cfg(not(feature = "voice_input"))]
+    use super::{VOICE, voice_command_is_allowed_for_build};
+    use crate::search::slash_command_menu::static_commands::commands;
+
+    #[cfg(not(feature = "voice_input"))]
+    #[test]
+    fn no_voice_build_hides_only_voice_command() {
+        assert!(!voice_command_is_allowed_for_build(VOICE.name, false));
+        assert!(voice_command_is_allowed_for_build(
+            commands::MCP.name,
+            false
+        ));
+        assert!(voice_command_is_allowed_for_build(
+            commands::EXIT.name,
+            false
+        ));
+    }
 
     #[test]
     fn voice_availability_requires_every_gate() {
