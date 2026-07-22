@@ -187,6 +187,32 @@ const LOG_BUNDLE_FAILED_HINT: &str = "Failed to create log bundle (check logs)";
 const NLD_ENABLED_HINT: &str = "Natural language detection enabled.";
 const NLD_DISABLED_HINT: &str = "Natural language detection disabled.";
 const NLD_PERSISTENCE_FAILED_HINT: &str = "Could not save the natural language detection setting.";
+struct FooterHint<'a> {
+    text: &'a str,
+    tone: TransientHintTone,
+}
+
+impl<'a> FooterHint<'a> {
+    fn muted(text: &'a str) -> Self {
+        Self {
+            text,
+            tone: TransientHintTone::Muted,
+        }
+    }
+
+    fn render(self, builder: &TuiUiBuilder) -> TuiFlex {
+        let style = match self.tone {
+            TransientHintTone::Muted => builder.muted_text_style(),
+            TransientHintTone::Success => builder.success_glyph_style(),
+        };
+        TuiFlex::row().child(
+            TuiText::new(self.text)
+                .with_style(style)
+                .truncate()
+                .finish(),
+        )
+    }
+}
 
 fn log_bundle_success_message(path: &Path) -> String {
     format!("Log bundle saved to {}", path.display())
@@ -465,6 +491,8 @@ pub(crate) struct TuiTerminalSessionView {
     orchestration_tabs_focused: bool,
     zero_state_view: ViewHandle<TuiZeroStateView>,
     voice_input_model: ModelHandle<TuiVoiceInputModel>,
+    voice_session_handle: Option<SpawnedFutureHandle>,
+    voice_transcription_handle: Option<SpawnedFutureHandle>,
 }
 
 /// Registers the session surface's keybindings. Called once at TUI startup
@@ -983,8 +1011,6 @@ impl TuiTerminalSessionView {
         });
         let input_editor_model =
             ctx.add_model(|ctx| CodeEditorModel::new_tui(INITIAL_INPUT_WIDTH, ctx));
-        let voice_input_model = ctx.add_model(TuiVoiceInputModel::new);
-        ctx.subscribe_to_model(&voice_input_model, |_, _, _, ctx| ctx.notify());
         let suggestions_mode = ctx.add_model(|_| TuiInputSuggestionsModeModel::new());
         let slash_commands_source = ctx.add_model(|ctx| {
             TuiSlashCommandDataSource::new(
@@ -1125,7 +1151,6 @@ impl TuiTerminalSessionView {
         let orchestration_tab_bar = ctx.add_typed_action_tui_view(|_| TuiTabBarView::empty());
         let orchestration_tab_bar_for_input = orchestration_tab_bar.clone();
         let input_editor_for_input = input_editor_model.clone();
-        let voice_input_model_for_input = voice_input_model.clone();
         let input_view = ctx.add_typed_action_tui_view(move |ctx| {
             TuiInputView::new(
                 input_editor_for_input,
@@ -1140,9 +1165,10 @@ impl TuiTerminalSessionView {
                 let terminal_model = terminal_model_for_input.lock();
                 tui_input_target(&terminal_model).agent_editor_owns_input()
             })
-            .with_voice_input(voice_input_model_for_input, ctx)
             .with_keyboard_enhancement_supported(keyboard_enhancement_supported)
         });
+        let voice_input_model = input_view.as_ref(ctx).voice_input_model().clone();
+        ctx.subscribe_to_model(&voice_input_model, |_, _, _, ctx| ctx.notify());
         let attachment_model = ctx.add_model(|ctx| {
             TuiAttachmentModel::new(
                 context_model.clone(),
@@ -1212,7 +1238,46 @@ impl TuiTerminalSessionView {
                 view.handle_accepted_prompt_history(text.clone(), ctx);
             }
             TuiInputViewEvent::VoiceEscape => {
-                view.handle_voice_escape(ctx);
+                match view.voice_input_model.as_ref(ctx).state() {
+                    TuiVoiceInputState::Listening => {
+                        let result = VoiceInput::handle(ctx)
+                            .update(ctx, |voice_input, ctx| voice_input.stop_listening(ctx));
+                        if let Err(error) = result {
+                            view.voice_input_model.update(ctx, |voice, ctx| {
+                                voice.fail(
+                                    voice.generation(),
+                                    "Failed to stop voice input".to_owned(),
+                                    ctx,
+                                );
+                            });
+                            report_error!(error.context("Failed to stop TUI voice input"));
+                        } else {
+                            view.voice_input_model
+                                .update(ctx, |voice, ctx| voice.stop(ctx));
+                        }
+                    }
+                    TuiVoiceInputState::Transcribing => {
+                        let conversion_pending =
+                            if let Some(handle) = view.voice_session_handle.take() {
+                                handle.abort();
+                                true
+                            } else {
+                                false
+                            };
+                        if let Some(handle) = view.voice_transcription_handle.take() {
+                            handle.abort();
+                        }
+                        if !conversion_pending {
+                            VoiceInput::handle(ctx)
+                                .update(ctx, |voice, _| voice.set_transcribing_active(false));
+                        }
+                        view.voice_input_model
+                            .update(ctx, |voice, ctx| voice.cancel(ctx));
+                        view.show_transient_hint("Voice input cancelled".to_owned(), ctx);
+                    }
+                    TuiVoiceInputState::Idle => {}
+                }
+                ctx.notify();
             }
             TuiInputViewEvent::MoveFocusUp => {
                 view.focus_orchestration_tabs(ctx);
@@ -1450,6 +1515,8 @@ impl TuiTerminalSessionView {
             orchestration_tabs_focused: false,
             zero_state_view,
             voice_input_model,
+            voice_session_handle: None,
+            voice_transcription_handle: None,
         }
     }
 
@@ -2219,6 +2286,43 @@ impl TuiTerminalSessionView {
         render_warping_indicator_row(label, elapsed, auto_approve, ctx)
     }
 
+    /// Selects the single message that replaces the normal footer, preserving
+    /// the priority order between competing session states.
+    fn footer_hint(
+        &self,
+        orchestration_tabs_available: bool,
+        ctx: &AppContext,
+    ) -> Option<FooterHint<'_>> {
+        if self.exit_confirmation.is_armed() {
+            return Some(FooterHint::muted(CTRL_C_EXIT_HINT));
+        }
+        if matches!(
+            &self.conversation_restore_state,
+            ConversationRestoreState::Loading {
+                origin: TuiConversationRestoreOrigin::ConversationList,
+                ..
+            }
+        ) {
+            return Some(FooterHint::muted(LOADING_CONVERSATION_HINT));
+        }
+        if let Some((text, tone)) = self.transient_hint.current() {
+            return Some(FooterHint { text, tone });
+        }
+        match self.voice_input_model.as_ref(ctx).state() {
+            TuiVoiceInputState::Listening => {
+                return Some(FooterHint::muted("voice mode · esc to stop"));
+            }
+            TuiVoiceInputState::Transcribing => {
+                return Some(FooterHint::muted("Transcribing... · esc to cancel"));
+            }
+            TuiVoiceInputState::Idle => {}
+        }
+        if orchestration_tabs_available && !self.is_shell_mode(ctx) {
+            return Some(FooterHint::muted("Shift + ↑ sub-agents"));
+        }
+        None
+    }
+
     /// Builds the status footer under the input box. The row is left-aligned:
     /// in agent mode `[model] [cwd ↬ branch] • [usage] • [+N -M]`, and in shell
     /// mode `[shell mode] [cwd ↬ branch] • [+N -M]` (model and usage hidden).
@@ -2230,65 +2334,12 @@ impl TuiTerminalSessionView {
     /// truncates to a single row, so the row lays out one row tall.
     fn render_footer(&self, orchestration_tabs_available: bool, ctx: &AppContext) -> TuiFlex {
         let builder = TuiUiBuilder::from_app(ctx);
-        let muted = builder.muted_text_style();
-
-        // Replacing hints occupy the entire status row, in the existing
-        // priority order: ctrl-c → loading → transient → orchestration callout.
-        if self.exit_confirmation.is_armed() {
-            return TuiFlex::row().child(
-                TuiText::new(CTRL_C_EXIT_HINT)
-                    .with_style(muted)
-                    .truncate()
-                    .finish(),
-            );
-        }
-        if matches!(
-            &self.conversation_restore_state,
-            ConversationRestoreState::Loading {
-                origin: TuiConversationRestoreOrigin::ConversationList,
-                ..
-            }
-        ) {
-            return TuiFlex::row().child(
-                TuiText::new(LOADING_CONVERSATION_HINT)
-                    .with_style(muted)
-                    .truncate()
-                    .finish(),
-            );
-        }
-        if let Some((transient, tone)) = self.transient_hint.current() {
-            let style = match tone {
-                TransientHintTone::Muted => muted,
-                TransientHintTone::Success => builder.success_glyph_style(),
-            };
-            return TuiFlex::row().child(
-                TuiText::new(transient)
-                    .with_style(style)
-                    .truncate()
-                    .finish(),
-            );
-        }
-        if let Some(status) = match self.voice_input_model.as_ref(ctx).state() {
-            TuiVoiceInputState::Listening => Some("voice mode · esc to stop"),
-            TuiVoiceInputState::Transcribing => Some("Transcribing..."),
-            TuiVoiceInputState::Idle => None,
-        } {
-            return TuiFlex::row()
-                .child(TuiText::new(status).with_style(muted).truncate().finish());
-        }
-        // The orchestration-tab callout replaces the status row in agent mode;
-        // shell mode wins so its first segment remains the shell indicator.
-        let shell_mode = self.is_shell_mode(ctx);
-        if orchestration_tabs_available && !shell_mode {
-            return TuiFlex::row().child(
-                TuiText::new("Shift + ↑ sub-agents")
-                    .with_style(muted)
-                    .truncate()
-                    .finish(),
-            );
+        if let Some(hint) = self.footer_hint(orchestration_tabs_available, ctx) {
+            return hint.render(&builder);
         }
 
         // Normal left-aligned sectioned status row.
+        let shell_mode = self.is_shell_mode(ctx);
         let git_metadata = self.git_status_metadata(ctx);
         let model_label = if shell_mode {
             None
@@ -2589,44 +2640,16 @@ impl TuiTerminalSessionView {
         }
     }
 
-    fn voice_available(&self, ctx: &AppContext) -> bool {
-        self.slash_commands_source
+    /// Starts TUI recording after revalidating entitlement, quota, and local routing.
+    fn start_voice_input(&mut self, ctx: &mut ViewContext<Self>) {
+        let voice_available = self
+            .slash_commands_source
             .as_ref(ctx)
             .local_skills_available(ctx)
             && AISettings::as_ref(ctx).is_voice_input_enabled(ctx)
             && UserWorkspaces::as_ref(ctx).is_voice_enabled()
-            && AIRequestUsageModel::as_ref(ctx).can_request_voice()
-    }
-
-    fn handle_voice_escape(&mut self, ctx: &mut ViewContext<Self>) {
-        match self.voice_input_model.as_ref(ctx).state() {
-            TuiVoiceInputState::Listening => {
-                let result = VoiceInput::handle(ctx)
-                    .update(ctx, |voice_input, ctx| voice_input.stop_listening(ctx));
-                if let Err(error) = result {
-                    self.voice_input_model.update(ctx, |voice, ctx| {
-                        voice.fail(
-                            voice.generation(),
-                            "Failed to stop voice input".to_owned(),
-                            ctx,
-                        );
-                    });
-                    report_error!(error.context("Failed to stop TUI voice input"));
-                } else {
-                    self.voice_input_model
-                        .update(ctx, |voice, ctx| voice.stop(ctx));
-                }
-            }
-            // A second Escape while conversion/transcription is pending is a
-            // handled no-op; the in-flight future must not be cancelled.
-            TuiVoiceInputState::Transcribing => {}
-            TuiVoiceInputState::Idle => {}
-        }
-        ctx.notify();
-    }
-
-    fn start_voice_input(&mut self, ctx: &mut ViewContext<Self>) {
-        if !self.voice_available(ctx) {
+            && AIRequestUsageModel::as_ref(ctx).can_request_voice();
+        if !voice_available {
             self.show_transient_hint("Voice input is unavailable".to_owned(), ctx);
             self.input_view.update(ctx, |input, ctx| input.clear(ctx));
             return;
@@ -2658,20 +2681,23 @@ impl TuiTerminalSessionView {
             voice.start(ctx);
         });
         let generation = self.voice_input_model.as_ref(ctx).generation();
-        ctx.spawn(
+        self.voice_session_handle = Some(ctx.spawn(
             async move { session.await_result().await },
             move |view, result, ctx| view.handle_voice_session_result(generation, result, ctx),
-        );
+        ));
         record_static_slash_command_accepted("/voice", true, ctx);
         ctx.notify();
     }
 
+    /// Starts transcription for audio returned by the current recording
+    /// session, ignoring results from a superseded voice generation.
     fn handle_voice_session_result(
         &mut self,
         generation: u64,
         result: VoiceSessionResult,
         ctx: &mut ViewContext<Self>,
     ) {
+        self.voice_session_handle = None;
         if !self
             .voice_input_model
             .as_ref(ctx)
@@ -2699,21 +2725,24 @@ impl TuiTerminalSessionView {
             .voice_input_language_code()
             .map(str::to_owned);
         VoiceInput::handle(ctx).update(ctx, |voice, _| voice.set_transcribing_active(true));
-        ctx.spawn(
+        self.voice_transcription_handle = Some(ctx.spawn(
             async move { transcriber.transcribe(wav_base64, language).await },
             move |view, result, ctx| {
                 view.handle_voice_transcription_result(generation, result, ctx);
             },
-        );
+        ));
         ctx.notify();
     }
 
+    /// Applies a transcription to the input for the matching voice generation
+    /// and returns the voice model to idle on success or failure.
     fn handle_voice_transcription_result(
         &mut self,
         generation: u64,
         result: Result<String, TranscribeError>,
         ctx: &mut ViewContext<Self>,
     ) {
+        self.voice_transcription_handle = None;
         if !self
             .voice_input_model
             .as_ref(ctx)
@@ -2728,7 +2757,7 @@ impl TuiTerminalSessionView {
                     voice.complete(generation, text.clone(), ctx);
                 });
                 self.input_view.update(ctx, |input, ctx| {
-                    input.insert_transcribed_text(&text, ctx);
+                    input.insert_text(&text, ctx);
                 });
             }
             Ok(_) => {

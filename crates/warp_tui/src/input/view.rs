@@ -187,8 +187,8 @@ pub struct TuiInputView {
     can_move_focus_up: Rc<dyn Fn(&AppContext) -> bool>,
     /// Consults the owner live before an inline-menu Enter can accept an item.
     can_accept_inline_menu: Rc<dyn Fn(&AppContext) -> bool>,
-    /// Optional TUI-only voice controller. Isolated input tests leave it unset.
-    voice_input: Option<ModelHandle<TuiVoiceInputModel>>,
+    /// TUI voice state used for Escape routing and shell-gutter suppression.
+    voice_input: ModelHandle<TuiVoiceInputModel>,
 }
 
 impl Entity for TuiInputView {
@@ -258,6 +258,7 @@ impl TuiInputView {
         can_move_focus_up: impl Fn(&AppContext) -> bool + 'static,
         ctx: &mut ViewContext<Self>,
     ) -> Self {
+        let voice_input = ctx.add_model(TuiVoiceInputModel::new);
         ctx.subscribe_to_model(&model, |_, _, event, ctx| {
             if matches!(event, CodeEditorModelEvent::ContentChanged { .. }) {
                 ctx.notify();
@@ -267,6 +268,7 @@ impl TuiInputView {
         // on the config (shell-mode gutter/border), so every event re-renders.
         ctx.subscribe_to_model(&input_mode, |_, _, _, ctx| ctx.notify());
         ctx.subscribe_to_model(&suggestions_mode, |_, _, _, ctx| ctx.notify());
+        ctx.subscribe_to_model(&voice_input, |_, _, _, ctx| ctx.notify());
         Self {
             model,
             input_mode,
@@ -280,7 +282,7 @@ impl TuiInputView {
             keyboard_enhancement_supported: false,
             can_move_focus_up: Rc::new(can_move_focus_up),
             can_accept_inline_menu: Rc::new(|_| true),
-            voice_input: None,
+            voice_input,
         }
     }
 
@@ -289,16 +291,6 @@ impl TuiInputView {
         can_accept_inline_menu: impl Fn(&AppContext) -> bool + 'static,
     ) -> Self {
         self.can_accept_inline_menu = Rc::new(can_accept_inline_menu);
-        self
-    }
-
-    pub(crate) fn with_voice_input(
-        mut self,
-        voice_input: ModelHandle<TuiVoiceInputModel>,
-        ctx: &mut ViewContext<Self>,
-    ) -> Self {
-        ctx.subscribe_to_model(&voice_input, |_, _, _, ctx| ctx.notify());
-        self.voice_input = Some(voice_input);
         self
     }
 
@@ -321,9 +313,11 @@ impl TuiInputView {
     }
 
     pub(crate) fn voice_is_active(&self, ctx: &AppContext) -> bool {
-        self.voice_input
-            .as_ref()
-            .is_some_and(|voice| voice.as_ref(ctx).is_active())
+        self.voice_input.as_ref(ctx).is_active()
+    }
+
+    pub(crate) fn voice_input_model(&self) -> &ModelHandle<TuiVoiceInputModel> {
+        &self.voice_input
     }
 
     /// Returns a handle to the backing [`CodeEditorModel`].
@@ -347,8 +341,8 @@ impl TuiInputView {
         ctx.notify();
     }
 
-    /// Inserts a completed voice transcription without submitting it.
-    pub(crate) fn insert_transcribed_text(&mut self, text: &str, ctx: &mut ViewContext<Self>) {
+    /// Inserts normalized text at the current cursor without submitting it.
+    pub(crate) fn insert_text(&mut self, text: &str, ctx: &mut ViewContext<Self>) {
         let text = self.editor_behavior.normalize_text(text);
         if !text.is_empty() {
             self.model.update(ctx, |m, ctx| m.user_insert(text, ctx));

@@ -11,16 +11,16 @@ use super::core::subscribe_to_shared_dependencies;
 use super::{
     InlineItem, SlashCommandDataSource, SlashCommandDataSourceState, UpdatedActiveCommands,
 };
-#[cfg(feature = "voice_input")]
-use crate::ai::AIRequestUsageModel;
 use crate::ai::blocklist::block::cli_controller::CLISubagentController;
+#[cfg(feature = "voice_input")]
+use crate::ai::{AIRequestUsageModel, AIRequestUsageModelEvent};
 use crate::search::SyncDataSource;
 use crate::search::data_source::{Query, QueryResult};
 use crate::search::mixer::DataSourceRunErrorWrapper;
 use crate::search::slash_command_menu::static_commands::Availability;
 use crate::search::slash_command_menu::static_commands::commands::{COMMAND_REGISTRY, VOICE};
 #[cfg(feature = "voice_input")]
-use crate::settings::AISettings;
+use crate::settings::{AISettings, AISettingsChangedEvent};
 use crate::terminal::TerminalModel;
 use crate::terminal::input::slash_commands::{
     AcceptSlashCommandOrSavedPrompt, slash_command_is_supported_in_tui,
@@ -28,21 +28,7 @@ use crate::terminal::input::slash_commands::{
 use crate::terminal::model::session::active_session::ActiveSession;
 use crate::terminal::view::resolve_ai_query_routing;
 #[cfg(feature = "voice_input")]
-use crate::workspaces::user_workspaces::UserWorkspaces;
-#[cfg(any(feature = "voice_input", test))]
-fn voice_command_gates_pass(
-    ai_enabled: bool,
-    team_enabled: bool,
-    quota_available: bool,
-    local_routing: bool,
-) -> bool {
-    ai_enabled && team_enabled && quota_available && local_routing
-}
-
-#[cfg(any(not(feature = "voice_input"), test))]
-fn voice_command_is_allowed_for_build(command_name: &str, voice_input_enabled: bool) -> bool {
-    voice_input_enabled || command_name != VOICE.name
-}
+use crate::workspaces::user_workspaces::{UserWorkspaces, UserWorkspacesEvent};
 
 pub struct TuiDataSourceArgs {
     pub active_session: ModelHandle<ActiveSession>,
@@ -74,30 +60,18 @@ impl TuiSlashCommandDataSource {
         );
         #[cfg(feature = "voice_input")]
         {
-            ctx.subscribe_to_model(
-                &crate::settings::AISettings::handle(ctx),
-                |me, _, event, ctx| {
-                    if matches!(
-                        event,
-                        crate::settings::AISettingsChangedEvent::VoiceInputEnabled { .. }
-                    ) {
-                        me.recompute_active_commands(ctx);
-                    }
-                },
-            );
+            ctx.subscribe_to_model(&AISettings::handle(ctx), |me, _, event, ctx| {
+                if matches!(event, AISettingsChangedEvent::VoiceInputEnabled { .. }) {
+                    me.recompute_active_commands(ctx);
+                }
+            });
             ctx.subscribe_to_model(&UserWorkspaces::handle(ctx), |me, _, event, ctx| {
-                if matches!(
-                    event,
-                    crate::workspaces::user_workspaces::UserWorkspacesEvent::TeamsChanged
-                ) {
+                if matches!(event, UserWorkspacesEvent::TeamsChanged) {
                     me.recompute_active_commands(ctx);
                 }
             });
             ctx.subscribe_to_model(&AIRequestUsageModel::handle(ctx), |me, _, event, ctx| {
-                if matches!(
-                    event,
-                    crate::ai::AIRequestUsageModelEvent::RequestUsageUpdated
-                ) {
+                if matches!(event, AIRequestUsageModelEvent::RequestUsageUpdated) {
                     me.recompute_active_commands(ctx);
                 }
             });
@@ -136,12 +110,19 @@ impl TuiSlashCommandDataSource {
     fn recompute_active_commands(&mut self, ctx: &mut ModelContext<Self>) {
         let availability = self.availability(ctx);
         let gates = self.common_command_gates(ctx);
+        #[cfg(feature = "voice_input")]
+        let voice_command_is_available = AISettings::as_ref(ctx).is_voice_input_enabled(ctx)
+            && UserWorkspaces::as_ref(ctx).is_voice_enabled()
+            && AIRequestUsageModel::as_ref(ctx).can_request_voice()
+            && self.local_skills_available(ctx);
+        #[cfg(not(feature = "voice_input"))]
+        let voice_command_is_available = false;
         let commands = HashMap::from_iter(
             COMMAND_REGISTRY
                 .all_commands_by_id()
                 .filter(|(_, command)| {
                     slash_command_is_supported_in_tui(command)
-                        && self.command_passes_voice_gates(command, ctx)
+                        && (command.name != VOICE.name || voice_command_is_available)
                         && self.command_passes_common_gates(command, availability, &gates)
                 })
                 .map(|(id, command)| (id, command.clone())),
@@ -156,33 +137,6 @@ impl TuiSlashCommandDataSource {
             | Availability::AGENT_VIEW
             | Availability::ACTIVE_CONVERSATION
             | Availability::NOT_CLOUD_AGENT
-    }
-
-    #[cfg(feature = "voice_input")]
-    fn command_passes_voice_gates(
-        &self,
-        command: &crate::search::slash_command_menu::StaticCommand,
-        ctx: &AppContext,
-    ) -> bool {
-        if command.name != VOICE.name {
-            return true;
-        }
-
-        voice_command_gates_pass(
-            AISettings::as_ref(ctx).is_voice_input_enabled(ctx),
-            UserWorkspaces::as_ref(ctx).is_voice_enabled(),
-            AIRequestUsageModel::as_ref(ctx).can_request_voice(),
-            self.local_skills_available(ctx),
-        )
-    }
-
-    #[cfg(not(feature = "voice_input"))]
-    fn command_passes_voice_gates(
-        &self,
-        command: &crate::search::slash_command_menu::StaticCommand,
-        _ctx: &AppContext,
-    ) -> bool {
-        voice_command_is_allowed_for_build(command.name, false)
     }
 }
 
@@ -222,39 +176,4 @@ impl SlashCommandDataSource for TuiSlashCommandDataSource {
 
 impl Entity for TuiSlashCommandDataSource {
     type Event = UpdatedActiveCommands;
-}
-
-#[cfg(test)]
-mod tests {
-    use super::voice_command_gates_pass;
-    #[cfg(not(feature = "voice_input"))]
-    use super::{VOICE, voice_command_is_allowed_for_build};
-    use crate::search::slash_command_menu::static_commands::commands;
-
-    #[cfg(not(feature = "voice_input"))]
-    #[test]
-    fn no_voice_build_hides_only_voice_command() {
-        assert!(!voice_command_is_allowed_for_build(VOICE.name, false));
-        assert!(voice_command_is_allowed_for_build(
-            commands::MCP.name,
-            false
-        ));
-        assert!(voice_command_is_allowed_for_build(
-            commands::EXIT.name,
-            false
-        ));
-    }
-
-    #[test]
-    fn voice_availability_requires_every_gate() {
-        assert!(voice_command_gates_pass(true, true, true, true));
-        for disabled_gate in 0..4 {
-            let mut gates = [true; 4];
-            gates[disabled_gate] = false;
-            assert!(
-                !voice_command_gates_pass(gates[0], gates[1], gates[2], gates[3]),
-                "gate {disabled_gate} must hide /voice"
-            );
-        }
-    }
 }

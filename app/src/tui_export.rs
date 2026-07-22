@@ -11,8 +11,8 @@ pub use ai::agent::orchestration_config::{OrchestrationConfig, OrchestrationConf
 pub use repo_metadata::repositories::RepoDetectionSource;
 #[cfg(feature = "voice_input")]
 pub use voice_input::{
-    StartListeningError, VoiceInput, VoiceInputState, VoiceInputToggledFrom, VoiceSession,
-    VoiceSessionResult,
+    StartListeningError, VoiceInput, VoiceInputLifecycle, VoiceInputLifecycleState,
+    VoiceInputState, VoiceInputToggledFrom, VoiceSession, VoiceSessionResult,
 };
 pub use warp_cli::agent::Harness;
 use warp_completer::completer::{CompletionContext as _, TopLevelCommandCaseSensitivity};

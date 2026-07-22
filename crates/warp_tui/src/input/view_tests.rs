@@ -485,8 +485,6 @@ fn build_view_with_voice(
     add_test_semantic_selection(ctx);
     let input_mode = BlocklistAIInputModel::mock(Rc::new(TestInputModePolicy), ctx);
     let suggestions_mode = add_suggestions_mode(ctx, TuiInputSuggestionsMode::Closed);
-    let voice_input = ctx.add_model(TuiVoiceInputModel::new);
-    let voice_input_for_view = voice_input.clone();
     let (_window_id, view) = ctx.add_tui_window(
         AddWindowOptions {
             window_style: WindowStyle::NotStealFocus,
@@ -502,9 +500,9 @@ fn build_view_with_voice(
                 |_| false,
                 ctx,
             )
-            .with_voice_input(voice_input_for_view, ctx)
         },
     );
+    let voice_input = view.as_ref(ctx).voice_input.clone();
     (view, voice_input)
 }
 

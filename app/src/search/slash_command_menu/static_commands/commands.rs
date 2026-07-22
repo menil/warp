@@ -66,6 +66,7 @@ pub const VIEW_LOGS: StaticCommand = StaticCommand {
     auto_enter_ai_mode: false,
     argument: None,
 };
+
 /// Starts the headless TUI voice-input session.
 ///
 /// This command is intentionally added to the registry only from the

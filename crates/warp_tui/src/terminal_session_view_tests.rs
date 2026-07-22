@@ -1047,7 +1047,7 @@ fn footer_renders_voice_listening_and_transcribing_states() {
         });
         assert_eq!(
             render_footer_lines(&mut app, &view, false, 80),
-            vec!["Transcribing..."]
+            vec!["Transcribing... · esc to cancel"]
         );
     });
 }
