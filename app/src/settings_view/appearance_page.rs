@@ -44,6 +44,8 @@ use super::{
     ToggleSettingActionPair, flags,
 };
 use crate::appearance::{Appearance, AppearanceEvent};
+use crate::auth::AuthStateProvider;
+use crate::auth::auth_manager::{AuthManager, AuthManagerEvent};
 use crate::channel::{Channel, ChannelState};
 use crate::context_chips::ChipAvailability;
 use crate::context_chips::prompt::{Prompt, PromptEvent};
@@ -907,6 +909,20 @@ impl AppearanceSettingsPageView {
 
         ctx.subscribe_to_model(&PaneSettings::handle(ctx), |_, _, _, ctx| {
             ctx.notify();
+        });
+
+        // Tools-panel switches render their effective state, which depends on
+        // auth and AI availability in addition to the stored preference.
+        ctx.subscribe_to_model(&AISettings::handle(ctx), |_, _, _, ctx| {
+            ctx.notify();
+        });
+        ctx.subscribe_to_model(&WarpDriveSettings::handle(ctx), |_, _, _, ctx| {
+            ctx.notify();
+        });
+        ctx.subscribe_to_model(&AuthManager::handle(ctx), |_, _, event, ctx| {
+            if matches!(event, AuthManagerEvent::AuthComplete) {
+                ctx.notify();
+            }
         });
 
         ctx.subscribe_to_model(&TerminalSettings::handle(ctx), |_, _, _, ctx| {
@@ -3638,24 +3654,43 @@ impl SettingsWidget for ToolsPanelConversationHistoryWidget {
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
+        let settings = AISettings::as_ref(app);
+        let available = settings.is_conversation_history_available(app);
+        let is_anonymous_or_logged_out = AuthStateProvider::as_ref(app)
+            .get()
+            .is_anonymous_or_logged_out();
+        let description = if available {
+            "Show the agent conversation history tab in the tools panel."
+        } else if is_anonymous_or_logged_out {
+            "Create an account and enable AI to show Agent conversations in the tools panel."
+        } else {
+            "Enable AI to show Agent conversations in the tools panel."
+        };
         render_body_item::<AppearancePageAction>(
             "Agent conversations".to_string(),
             None,
             LocalOnlyIconState::Hidden,
-            ToggleState::Enabled,
+            if available {
+                ToggleState::Enabled
+            } else {
+                ToggleState::Disabled
+            },
             appearance,
             appearance
                 .ui_builder()
                 .switch(self.switch_state.clone())
-                .check(*AISettings::as_ref(app).show_conversation_history)
+                .check(settings.is_conversation_history_enabled(app))
+                .with_disabled(!available)
                 .build()
-                .on_click(|evt_ctx, _app, _v2f| {
-                    evt_ctx.dispatch_typed_action(
-                        AppearancePageAction::ToggleToolsPanelConversationHistory,
-                    );
+                .on_click(move |evt_ctx, _app, _v2f| {
+                    if available {
+                        evt_ctx.dispatch_typed_action(
+                            AppearancePageAction::ToggleToolsPanelConversationHistory,
+                        );
+                    }
                 })
                 .finish(),
-            Some("Show the agent conversation history tab in the tools panel.".to_string()),
+            Some(description.to_string()),
         )
     }
 }
@@ -3717,22 +3752,36 @@ impl SettingsWidget for ToolsPanelWarpDriveWidget {
         appearance: &Appearance,
         app: &AppContext,
     ) -> Box<dyn Element> {
+        let available = WarpDriveSettings::is_warp_drive_available(app);
+        let description = if available {
+            "Show the Warp Drive tab in the tools panel."
+        } else {
+            "Create an account to show Warp Drive in the tools panel."
+        };
         render_body_item::<AppearancePageAction>(
             "Warp Drive".to_string(),
             None,
             LocalOnlyIconState::Hidden,
-            ToggleState::Enabled,
+            if available {
+                ToggleState::Enabled
+            } else {
+                ToggleState::Disabled
+            },
             appearance,
             appearance
                 .ui_builder()
                 .switch(self.switch_state.clone())
-                .check(*WarpDriveSettings::as_ref(app).enable_warp_drive)
+                .check(WarpDriveSettings::is_warp_drive_enabled(app))
+                .with_disabled(!available)
                 .build()
-                .on_click(|evt_ctx, _app, _v2f| {
-                    evt_ctx.dispatch_typed_action(AppearancePageAction::ToggleToolsPanelWarpDrive);
+                .on_click(move |evt_ctx, _app, _v2f| {
+                    if available {
+                        evt_ctx
+                            .dispatch_typed_action(AppearancePageAction::ToggleToolsPanelWarpDrive);
+                    }
                 })
                 .finish(),
-            Some("Show the Warp Drive tab in the tools panel.".to_string()),
+            Some(description.to_string()),
         )
     }
 }

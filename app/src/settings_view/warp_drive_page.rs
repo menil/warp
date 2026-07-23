@@ -23,6 +23,7 @@ use super::{
 };
 use crate::appearance::Appearance;
 use crate::auth::AuthStateProvider;
+use crate::auth::auth_manager::{AuthManager, AuthManagerEvent};
 use crate::drive::settings::WarpDriveSettings;
 
 #[derive(Debug, Clone)]
@@ -65,7 +66,12 @@ pub struct WarpDriveSettingsPageView {
 }
 
 impl WarpDriveSettingsPageView {
-    pub fn new(_ctx: &mut ViewContext<Self>) -> Self {
+    pub fn new(ctx: &mut ViewContext<Self>) -> Self {
+        ctx.subscribe_to_model(&AuthManager::handle(ctx), |_, _, event, ctx| {
+            if matches!(event, AuthManagerEvent::AuthComplete) {
+                ctx.notify();
+            }
+        });
         Self {
             page: PageType::new_uncategorized(
                 vec![
@@ -243,10 +249,7 @@ impl SettingsWidget for WarpDriveToggleWidget {
         app: &AppContext,
     ) -> Box<dyn Element> {
         let settings = WarpDriveSettings::as_ref(app);
-        let is_anonymous_or_logged_out = FeatureFlag::SkipFirebaseAnonymousUser.is_enabled()
-            && AuthStateProvider::as_ref(app)
-                .get()
-                .is_anonymous_or_logged_out();
+        let available = WarpDriveSettings::is_warp_drive_available(app);
 
         render_body_item::<WarpDriveSettingsPageAction>(
             "Warp Drive".into(),
@@ -259,20 +262,20 @@ impl SettingsWidget for WarpDriveToggleWidget {
                 tooltip_override_text: None,
             }),
             LocalOnlyIconState::Hidden,
-            if is_anonymous_or_logged_out {
-                ToggleState::Disabled
-            } else {
+            if available {
                 ToggleState::Enabled
+            } else {
+                ToggleState::Disabled
             },
             appearance,
             appearance
                 .ui_builder()
                 .switch(self.switch_state.clone())
-                .check(*settings.enable_warp_drive && !is_anonymous_or_logged_out)
-                .with_disabled(is_anonymous_or_logged_out)
+                .check(*settings.enable_warp_drive && available)
+                .with_disabled(!available)
                 .build()
                 .on_click(move |ctx, _, _| {
-                    if !is_anonymous_or_logged_out {
+                    if available {
                         ctx.dispatch_typed_action(
                             WarpDriveSettingsPageAction::ToggleShowWarpDrive,
                         );
