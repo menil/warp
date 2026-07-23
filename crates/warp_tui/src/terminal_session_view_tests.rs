@@ -36,8 +36,8 @@ use super::{
     INLINE_MENU_TOP_PADDING_ROWS, LOADING_CONVERSATION_HINT, LOG_BUNDLE_FAILED_HINT,
     SHELL_MODE_HINT, TuiConversationRestoreOrigin, TuiTerminalSessionAction,
     TuiTerminalSessionEvent, TuiTerminalSessionView, cost_command_unavailable_hint,
-    export_file_success_message, log_bundle_success_message, raw_prompt_if_not_blank,
-    render_status_footer_row,
+    attachment_focus_available, export_file_success_message, log_bundle_success_message,
+    raw_prompt_if_not_blank, render_status_footer_row,
 };
 use crate::autoupdate::TuiAutoupdater;
 use crate::inline_menu::MAX_INLINE_MENU_ROWS;
@@ -62,6 +62,13 @@ use crate::usage::UsageToggle;
 struct FocusTestFixture {
     window_id: warpui_core::WindowId,
     sessions: ModelHandle<TuiSessions>,
+}
+
+#[test]
+fn shell_mode_reserves_tab_even_when_attachments_render() {
+    assert!(attachment_focus_available(false, true));
+    assert!(!attachment_focus_available(true, true));
+    assert!(!attachment_focus_available(false, false));
 }
 
 #[test]
